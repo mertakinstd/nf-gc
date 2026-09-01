@@ -1,0 +1,180 @@
+nextflow_pipeline {
+
+    name "nf-gc ownership regression matrix"
+    script "tests/regression/ownership.nf"
+
+    test("keeps an external input with default staging and deletes only generated output") {
+        when {
+            params {
+                scenario = 'external_default'
+                external_path = "$launchDir/external/source.txt"
+            }
+        }
+        then {
+            assert workflow.success
+            def events = path("$launchDir/nf-gc-events.tsv").readLines()
+            assert path(params.external_path).exists()
+            assert path(params.external_path).text == 'external-data\n'
+            assert events.count { it.startsWith('ARTIFACT_TRACKED\tCOPY_EXTERNAL_DEFAULT\t') } == 1
+            def deleted = events.find { it.startsWith('ARTIFACT_DELETED\tCOPY_EXTERNAL_DEFAULT\t') }
+            assert deleted != null
+            assert !java.nio.file.Files.exists(path(deleted.split('\t', 3)[2]), java.nio.file.LinkOption.NOFOLLOW_LINKS)
+            assert !events.any { it.contains("\t${params.external_path}") && it.startsWith('ARTIFACT_DELETED\t') }
+        }
+    }
+
+    test("keeps an external input when stageInMode is copy") {
+        when {
+            params {
+                scenario = 'external_stage_copy'
+                external_path = "$launchDir/external/source.txt"
+            }
+        }
+        then {
+            assert workflow.success
+            def events = path("$launchDir/nf-gc-events.tsv").readLines()
+            assert path(params.external_path).exists()
+            assert path(params.external_path).text == 'external-data\n'
+            assert events.count { it.startsWith('ARTIFACT_TRACKED\tCOPY_EXTERNAL_STAGE_COPY\t') } == 1
+            def deleted = events.find { it.startsWith('ARTIFACT_DELETED\tCOPY_EXTERNAL_STAGE_COPY\t') }
+            assert deleted != null
+            assert !java.nio.file.Files.exists(path(deleted.split('\t', 3)[2]), java.nio.file.LinkOption.NOFOLLOW_LINKS)
+        }
+    }
+
+    test("does not acquire ownership when an external staged input is re-emitted") {
+        when {
+            params {
+                scenario = 'external_reemit'
+                external_path = "$launchDir/external/source.txt"
+            }
+        }
+        then {
+            assert workflow.success
+            def events = path("$launchDir/nf-gc-events.tsv").readLines()
+            assert path(params.external_path).exists()
+            assert path(params.external_path).text == 'external-data\n'
+            assert !events.any { it.startsWith('ARTIFACT_TRACKED\tPASSTHROUGH_DEFAULT\t') }
+            assert events.any { it.startsWith('ARTIFACT_HOLD\tPASSTHROUGH_DEFAULT\t') }
+            assert !events.any { it.startsWith('ARTIFACT_DELETED\tPASSTHROUGH_DEFAULT\t') }
+        }
+    }
+
+    test("holds an upstream artifact through a default-staged pass-through relay") {
+        when {
+            params {
+                scenario = 'passthrough_default'
+            }
+        }
+        then {
+            assert workflow.success
+            def events = path("$launchDir/nf-gc-events.tsv").readLines()
+            def hold = events.findIndexOf { it.startsWith('ARTIFACT_HOLD\tPASSTHROUGH_DEFAULT\t') }
+            def producerClosed = events.findIndexOf { it == 'DEPENDENCY_CLOSED\tGENERATED_SOURCE' }
+            def relayClosed = events.findIndexOf { it == 'DEPENDENCY_CLOSED\tPASSTHROUGH_DEFAULT' }
+            def deleted = events.findIndexOf { it.startsWith('ARTIFACT_DELETED\tGENERATED_SOURCE\t') }
+            assert hold >= 0
+            assert producerClosed >= 0
+            assert relayClosed > producerClosed
+            assert deleted > relayClosed
+            def deletedPath = events[deleted].split('\t', 3)[2]
+            assert !java.nio.file.Files.exists(path(deletedPath), java.nio.file.LinkOption.NOFOLLOW_LINKS)
+            assert !events.any { it.startsWith('ARTIFACT_TRACKED\tPASSTHROUGH_DEFAULT\t') }
+        }
+    }
+
+    test("conservatively holds an upstream artifact through a copy-staged pass-through relay") {
+        when {
+            params {
+                scenario = 'passthrough_stage_copy'
+            }
+        }
+        then {
+            assert workflow.success
+            def events = path("$launchDir/nf-gc-events.tsv").readLines()
+            def producerClosed = events.findIndexOf { it == 'DEPENDENCY_CLOSED\tGENERATED_SOURCE' }
+            def relayClosed = events.findIndexOf { it == 'DEPENDENCY_CLOSED\tPASSTHROUGH_STAGE_COPY' }
+            def deleted = events.findIndexOf { it.startsWith('ARTIFACT_DELETED\tGENERATED_SOURCE\t') }
+            assert events.any { it.startsWith('ARTIFACT_HOLD\tPASSTHROUGH_STAGE_COPY\t') }
+            assert relayClosed > producerClosed
+            assert deleted > relayClosed
+            def deletedPath = events[deleted].split('\t', 3)[2]
+            assert !java.nio.file.Files.exists(path(deletedPath), java.nio.file.LinkOption.NOFOLLOW_LINKS)
+            assert !events.any { it.startsWith('ARTIFACT_TRACKED\tPASSTHROUGH_STAGE_COPY\t') }
+        }
+    }
+
+    test("deletes a generated symlink without following its external target") {
+        when {
+            params {
+                scenario = 'symlink_output'
+                external_path = "$launchDir/external/target.txt"
+            }
+        }
+        then {
+            assert workflow.success
+            def events = path("$launchDir/nf-gc-events.tsv").readLines()
+            assert path(params.external_path).exists()
+            assert path(params.external_path).text == 'external-target\n'
+            def deleted = events.find { it.startsWith('ARTIFACT_DELETED\tSYMLINK_OUTPUT\t') }
+            assert deleted != null
+            assert !java.nio.file.Files.exists(path(deleted.split('\t', 3)[2]), java.nio.file.LinkOption.NOFOLLOW_LINKS)
+        }
+    }
+
+    test("recursive directory cleanup does not follow an external symlink") {
+        when {
+            params {
+                scenario = 'directory_symlink'
+                external_path = "$launchDir/external/target.txt"
+            }
+        }
+        then {
+            assert workflow.success
+            def events = path("$launchDir/nf-gc-events.tsv").readLines()
+            assert path(params.external_path).exists()
+            assert path(params.external_path).text == 'external-target\n'
+            def deleted = events.find { it.startsWith('ARTIFACT_DELETED\tDIRECTORY_WITH_EXTERNAL_SYMLINK\t') }
+            assert deleted != null
+            assert !java.nio.file.Files.exists(path(deleted.split('\t', 3)[2]), java.nio.file.LinkOption.NOFOLLOW_LINKS)
+            assert !events.any { it.startsWith('ARTIFACT_DELETE_FAILED\t') }
+        }
+    }
+
+    test("tracks every realized file in a glob output") {
+        when {
+            params {
+                scenario = 'glob_outputs'
+            }
+        }
+        then {
+            assert workflow.success
+            def events = path("$launchDir/nf-gc-events.tsv").readLines()
+            assert events.count { it.startsWith('ARTIFACT_TRACKED\tGLOB_SOURCE\t') } == 2
+            def deleted = events.findAll { it.startsWith('ARTIFACT_DELETED\tGLOB_SOURCE\t') }
+            assert deleted.size() == 2
+            deleted.each { event ->
+                assert !java.nio.file.Files.exists(path(event.split('\t', 3)[2]), java.nio.file.LinkOption.NOFOLLOW_LINKS)
+            }
+            assert !events.any { it.startsWith('ARTIFACT_MISSING\tGLOB_SOURCE\t') }
+        }
+    }
+
+    test("does not invent a missing artifact for an absent optional output") {
+        when {
+            params {
+                scenario = 'optional_absent'
+                emit_optional = false
+            }
+        }
+        then {
+            assert workflow.success
+            def events = path("$launchDir/nf-gc-events.tsv").readLines()
+            assert events.count { it.startsWith('ARTIFACT_TRACKED\tOPTIONAL_SOURCE\t') } == 1
+            def deleted = events.find { it.startsWith('ARTIFACT_DELETED\tOPTIONAL_SOURCE\t') }
+            assert deleted != null
+            assert !java.nio.file.Files.exists(path(deleted.split('\t', 3)[2]), java.nio.file.LinkOption.NOFOLLOW_LINKS)
+            assert !events.any { it.startsWith('ARTIFACT_MISSING\tOPTIONAL_SOURCE\t') }
+        }
+    }
+}

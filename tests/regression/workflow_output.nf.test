@@ -1,0 +1,24 @@
+nextflow_pipeline {
+
+    name "nf-gc workflow-output safety"
+    script "tests/regression/workflow_output.nf"
+
+    test("keeps a non-terminal artifact selected as a workflow output") {
+        then {
+            assert workflow.success
+            def events = path("$launchDir/nf-gc-events.tsv").readLines()
+            assert events.contains('ARTIFACT_KEEP\tWORKFLOW_SOURCE\tWORKFLOW_OUTPUT')
+            assert !events.any { it.startsWith('ARTIFACT_DELETED\tWORKFLOW_SOURCE\t') }
+            def workflowOutput = events.find { it.startsWith('WORKFLOW_OUTPUT\tpublished_source\t') }
+            assert workflowOutput != null
+            assert path("$launchDir/results/published/source.txt").exists()
+            assert path("$launchDir/results/published/source.txt").text == 'workflow-output\n'
+
+            def sourceFiles = []
+            java.nio.file.Files.walk(path(workDir)).withCloseable { stream ->
+                stream.filter { it.fileName.toString() == 'source.txt' }.forEach { sourceFiles << it }
+            }
+            assert sourceFiles.size() >= 1
+        }
+    }
+}

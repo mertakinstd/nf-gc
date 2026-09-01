@@ -1,0 +1,103 @@
+nextflow_pipeline {
+
+    name "nf-gc lifecycle regression matrix"
+    script "tests/regression/lifecycle.nf"
+
+    test("keeps outputs from a failed task") {
+        when {
+            params {
+                scenario = 'failed'
+            }
+        }
+        then {
+            assert workflow.success
+            assert workflow.trace.failed().size() == 1
+            def events = path("$launchDir/nf-gc-events.tsv").readLines()
+            assert events.contains('ARTIFACT_KEEP\tFAIL_IGNORED\tUNKNOWN')
+            assert !events.any { it.startsWith('ARTIFACT_TRACKED\tFAIL_IGNORED\t') }
+            assert !events.any { it.startsWith('ARTIFACT_DELETED\tFAIL_IGNORED\t') }
+            def failedFiles = []
+            java.nio.file.Files.walk(path(workDir)).withCloseable { stream ->
+                stream.filter { it.fileName.toString() == 'failed.txt' }.forEach { failedFiles << it }
+            }
+            assert failedFiles.size() == 1
+        }
+    }
+
+    test("does not clean an aborted task during workflow termination") {
+        when {
+            params {
+                scenario = 'aborted'
+                abort_signal = "$launchDir/abort-started"
+            }
+        }
+        then {
+            assert workflow.failed
+            def events = path("$launchDir/nf-gc-events.tsv").readLines()
+            assert !events.any { it.startsWith('ARTIFACT_DELETED\tABORTED_SLOW\t') }
+            assert !events.any { it.startsWith('ARTIFACT_TRACKED\tABORTED_SLOW\t') }
+            assert path(params.abort_signal).exists()
+        }
+    }
+
+    test("keeps the failed retry attempt and deletes the successful attempt normally") {
+        when {
+            params {
+                scenario = 'retry'
+            }
+        }
+        then {
+            assert workflow.success
+            assert workflow.trace.failed().size() == 1
+            def events = path("$launchDir/nf-gc-events.tsv").readLines()
+            assert events.count { it == 'ARTIFACT_KEEP\tRETRY_SOURCE\tUNKNOWN' } == 1
+            assert events.count { it.startsWith('ARTIFACT_TRACKED\tRETRY_SOURCE\t') } == 1
+            def deleted = events.find { it.startsWith('ARTIFACT_DELETED\tRETRY_SOURCE\t') }
+            assert deleted != null
+            assert !java.nio.file.Files.exists(path(deleted.split('\t', 3)[2]), java.nio.file.LinkOption.NOFOLLOW_LINKS)
+
+            def retryFiles = []
+            java.nio.file.Files.walk(path(workDir)).withCloseable { stream ->
+                stream.filter {
+                    it.fileName.toString() == 'result.txt' &&
+                    java.nio.file.Files.isRegularFile(it, java.nio.file.LinkOption.NOFOLLOW_LINKS)
+                }.forEach { retryFiles << it }
+            }
+            assert retryFiles.size() == 1
+            assert retryFiles.first().text.startsWith('attempt-1')
+        }
+    }
+
+    test("reports a missing artifact without failing the workflow") {
+        when {
+            params {
+                scenario = 'missing'
+            }
+        }
+        then {
+            assert workflow.success
+            def events = path("$launchDir/nf-gc-events.tsv").readLines()
+            assert events.count { it.startsWith('ARTIFACT_MISSING\tMISSING_SOURCE\t') } == 1
+            assert !events.any { it.startsWith('ARTIFACT_DELETE_FAILED\tMISSING_SOURCE\t') }
+        }
+    }
+
+    test("reports a filesystem deletion failure without failing the workflow") {
+        when {
+            params {
+                scenario = 'delete_failure'
+            }
+        }
+        then {
+            assert workflow.success
+            def events = path("$launchDir/nf-gc-events.tsv").readLines()
+            def failure = events.find { it.startsWith('ARTIFACT_DELETE_FAILED\tDELETE_FAILURE_SOURCE\t') }
+            assert failure != null
+            assert !events.any { it.startsWith('ARTIFACT_DELETED\tDELETE_FAILURE_SOURCE\t') }
+
+            def failedPath = path(failure.split('\t')[2])
+            assert failedPath.exists()
+            failedPath.toFile().setWritable(true, true)
+        }
+    }
+}

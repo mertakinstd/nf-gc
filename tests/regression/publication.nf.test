@@ -1,0 +1,234 @@
+nextflow_pipeline {
+
+    name "nf-gc publication regression matrix"
+    script "tests/regression/publication.nf"
+
+
+    test("keeps copy publish mode under the binary publication policy") {
+        when {
+            params {
+                scenario = 'publish_mode'
+                publish_mode = 'copy'
+                publish_dir = "$launchDir/mode-copy"
+            }
+        }
+        then {
+            assert workflow.success
+            def events = path("$launchDir/nf-gc-events.tsv").readLines()
+            assert events.contains('ARTIFACT_KEEP\tPUBLISH_MODE\tPUBLISH_DIR')
+            assert !events.any { it.startsWith('ARTIFACT_TRACKED\tPUBLISH_MODE\t') }
+            assert !events.any { it.startsWith('ARTIFACT_DELETED\tPUBLISH_MODE\t') }
+            def published = path("$launchDir/mode-copy/mode.txt")
+            assert published.exists()
+            assert published.text == 'copy\n'
+        }
+    }
+
+    test("keeps copyNoFollow publish mode under the binary publication policy") {
+        when {
+            params {
+                scenario = 'publish_mode'
+                publish_mode = 'copyNoFollow'
+                publish_dir = "$launchDir/mode-copyNoFollow"
+            }
+        }
+        then {
+            assert workflow.success
+            def events = path("$launchDir/nf-gc-events.tsv").readLines()
+            assert events.contains('ARTIFACT_KEEP\tPUBLISH_MODE\tPUBLISH_DIR')
+            assert !events.any { it.startsWith('ARTIFACT_TRACKED\tPUBLISH_MODE\t') }
+            assert !events.any { it.startsWith('ARTIFACT_DELETED\tPUBLISH_MODE\t') }
+            def published = path("$launchDir/mode-copyNoFollow/mode.txt")
+            assert published.exists()
+            assert published.text == 'copyNoFollow\n'
+        }
+    }
+
+    test("keeps hard-link publish mode under the binary publication policy") {
+        when {
+            params {
+                scenario = 'publish_mode'
+                publish_mode = 'link'
+                publish_dir = "$launchDir/mode-link"
+            }
+        }
+        then {
+            assert workflow.success
+            def events = path("$launchDir/nf-gc-events.tsv").readLines()
+            assert events.contains('ARTIFACT_KEEP\tPUBLISH_MODE\tPUBLISH_DIR')
+            assert !events.any { it.startsWith('ARTIFACT_TRACKED\tPUBLISH_MODE\t') }
+            assert !events.any { it.startsWith('ARTIFACT_DELETED\tPUBLISH_MODE\t') }
+            def published = path("$launchDir/mode-link/mode.txt")
+            assert published.exists()
+            assert published.text == 'link\n'
+        }
+    }
+
+    test("keeps absolute-symlink publish mode under the binary publication policy") {
+        when {
+            params {
+                scenario = 'publish_mode'
+                publish_mode = 'symlink'
+                publish_dir = "$launchDir/mode-symlink"
+            }
+        }
+        then {
+            assert workflow.success
+            def events = path("$launchDir/nf-gc-events.tsv").readLines()
+            assert events.contains('ARTIFACT_KEEP\tPUBLISH_MODE\tPUBLISH_DIR')
+            assert !events.any { it.startsWith('ARTIFACT_TRACKED\tPUBLISH_MODE\t') }
+            assert !events.any { it.startsWith('ARTIFACT_DELETED\tPUBLISH_MODE\t') }
+            def published = path("$launchDir/mode-symlink/mode.txt")
+            assert published.exists()
+            assert published.text == 'symlink\n'
+        }
+    }
+
+    test("keeps relative-symlink publish mode under the binary publication policy") {
+        when {
+            params {
+                scenario = 'publish_mode'
+                publish_mode = 'rellink'
+                publish_dir = "$launchDir/mode-rellink"
+            }
+        }
+        then {
+            assert workflow.success
+            def events = path("$launchDir/nf-gc-events.tsv").readLines()
+            assert events.contains('ARTIFACT_KEEP\tPUBLISH_MODE\tPUBLISH_DIR')
+            assert !events.any { it.startsWith('ARTIFACT_TRACKED\tPUBLISH_MODE\t') }
+            assert !events.any { it.startsWith('ARTIFACT_DELETED\tPUBLISH_MODE\t') }
+            def published = path("$launchDir/mode-rellink/mode.txt")
+            assert published.exists()
+            assert published.text == 'rellink\n'
+        }
+    }
+
+    test("does not reclaim move publish mode under the binary publication policy") {
+        when {
+            params {
+                scenario = 'publish_mode'
+                publish_mode = 'move'
+                publish_dir = "$launchDir/mode-move"
+            }
+        }
+        then {
+            assert workflow.success
+            def events = path("$launchDir/nf-gc-events.tsv").readLines()
+            assert events.contains('ARTIFACT_KEEP\tPUBLISH_MODE\tPUBLISH_DIR')
+            assert !events.any { it.startsWith('ARTIFACT_TRACKED\tPUBLISH_MODE\t') }
+            assert !events.any { it.startsWith('ARTIFACT_DELETED\tPUBLISH_MODE\t') }
+            def published = path("$launchDir/mode-move/mode.txt")
+            assert published.exists()
+            assert published.text == 'move\n'
+        }
+    }
+
+    test("keeps every artifact from a process with publishDir") {
+        when {
+            params {
+                scenario = 'publish_all'
+                publish_dir = "$launchDir/published"
+            }
+        }
+        then {
+            assert workflow.success
+            def events = path("$launchDir/nf-gc-events.tsv").readLines()
+            assert events.contains('ARTIFACT_KEEP\tPUBLISH_ALL\tPUBLISH_DIR')
+            assert !events.any { it.startsWith('ARTIFACT_TRACKED\tPUBLISH_ALL\t') }
+            assert !events.any { it.startsWith('ARTIFACT_DELETED\tPUBLISH_ALL\t') }
+            assert path("$launchDir/published/result.txt").exists()
+        }
+    }
+
+    test("keeps the whole task when publishDir selects only one output") {
+        when {
+            params {
+                scenario = 'partial_publish'
+                publish_dir = "$launchDir/published"
+            }
+        }
+        then {
+            assert workflow.success
+            def events = path("$launchDir/nf-gc-events.tsv").readLines()
+            assert events.contains('ARTIFACT_KEEP\tPARTIAL_PUBLISH\tPUBLISH_DIR')
+            assert !events.any { it.startsWith('ARTIFACT_TRACKED\tPARTIAL_PUBLISH\t') }
+            assert path("$launchDir/published/published.txt").exists()
+            assert !path("$launchDir/published/private.txt").exists()
+            def privateFiles = []
+            java.nio.file.Files.walk(path(workDir)).withCloseable { stream ->
+                stream.filter {
+                    it.fileName.toString() == 'private.txt' &&
+                    java.nio.file.Files.isRegularFile(it, java.nio.file.LinkOption.NOFOLLOW_LINKS)
+                }.forEach { privateFiles << it }
+            }
+            assert privateFiles.size() == 1
+        }
+    }
+
+    test("keeps the whole task with multiple publishDir directives") {
+        when {
+            params {
+                scenario = 'multiple_publish'
+                publish_dir = "$launchDir/published-one"
+                publish_dir_2 = "$launchDir/published-two"
+            }
+        }
+        then {
+            assert workflow.success
+            def events = path("$launchDir/nf-gc-events.tsv").readLines()
+            assert events.contains('ARTIFACT_KEEP\tMULTIPLE_PUBLISH\tPUBLISH_DIR')
+            assert !events.any { it.startsWith('ARTIFACT_TRACKED\tMULTIPLE_PUBLISH\t') }
+            assert path("$launchDir/published-one/one.txt").exists()
+            assert path("$launchDir/published-two/two.txt").exists()
+        }
+    }
+
+    test("freezes the runtime semantics of publishDir enabled false conservatively") {
+        when {
+            params {
+                scenario = 'disabled_publish'
+                publish_dir = "$launchDir/disabled-publish"
+            }
+        }
+        then {
+            assert workflow.success
+            def events = path("$launchDir/nf-gc-events.tsv").readLines()
+            assert !path("$launchDir/disabled-publish/result.txt").exists()
+            assert events.contains('ARTIFACT_KEEP\tDISABLED_PUBLISH\tPUBLISH_DIR')
+            assert !events.any { it.startsWith('ARTIFACT_DELETED\tDISABLED_PUBLISH\t') }
+        }
+    }
+
+    test("keeps storeDir outputs outside task work ownership") {
+        when {
+            params {
+                scenario = 'store_dir'
+                store_dir = "$launchDir/store"
+            }
+        }
+        then {
+            assert workflow.success
+            def events = path("$launchDir/nf-gc-events.tsv").readLines()
+            assert events.contains('ARTIFACT_KEEP\tSTORE_SOURCE\tTARGET_DIR')
+            assert !events.any { it.startsWith('ARTIFACT_TRACKED\tSTORE_SOURCE\t') }
+            assert !events.any { it.startsWith('ARTIFACT_DELETED\tSTORE_SOURCE\t') }
+            assert path("$launchDir/store/stored.txt").exists()
+        }
+    }
+
+    test("keeps a terminal process without publishDir") {
+        when {
+            params {
+                scenario = 'terminal'
+            }
+        }
+        then {
+            assert workflow.success
+            def events = path("$launchDir/nf-gc-events.tsv").readLines()
+            assert events.contains('ARTIFACT_KEEP\tTERMINAL_SOURCE\tTERMINAL')
+            assert !events.any { it.startsWith('ARTIFACT_DELETED\tTERMINAL_SOURCE\t') }
+        }
+    }
+
+}

@@ -52,7 +52,7 @@ final class GcDependencyState {
      *
      * Unknown processes are conservatively ignored: UNKNOWN -> KEEP.
      */
-    Collection<TaskProcessor> onProcessTerminate(TaskProcessor process) {
+    synchronized Collection<TaskProcessor> onProcessTerminate(TaskProcessor process) {
         if( process == null || !graph.contains(process) )
             return Collections.emptyList()
 
@@ -76,11 +76,11 @@ final class GcDependencyState {
         return Collections.unmodifiableList(newlyClosed)
     }
 
-    boolean isTerminated(TaskProcessor process) {
+    synchronized boolean isTerminated(TaskProcessor process) {
         return process != null && terminated.contains(process)
     }
 
-    boolean isDependencyClosed(TaskProcessor process) {
+    synchronized boolean isDependencyClosed(TaskProcessor process) {
         return process != null && closed.contains(process)
     }
 

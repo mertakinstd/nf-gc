@@ -1,0 +1,80 @@
+nextflow_pipeline {
+
+    name "nf-gc topology regression matrix"
+    script "tests/regression/topology.nf"
+
+    test("waits for the slow consumer before deleting either output port") {
+        when {
+            params {
+                scenario = 'dual_port'
+            }
+        }
+        then {
+            assert workflow.success
+            def events = path("$launchDir/nf-gc-events.tsv").readLines()
+            assert events.count { it.startsWith('ARTIFACT_TRACKED\tDUAL_SOURCE\t') } == 2
+            def deletedArtifacts = events.findAll { it.startsWith('ARTIFACT_DELETED\tDUAL_SOURCE\t') }
+            assert deletedArtifacts.size() == 2
+            deletedArtifacts.each { event ->
+                assert !java.nio.file.Files.exists(path(event.split('\t', 3)[2]), java.nio.file.LinkOption.NOFOLLOW_LINKS)
+            }
+
+            def fastTerminated = events.findIndexOf { it == 'PROCESS_TERMINATE\tFAST_CONSUMER' }
+            def slowTerminated = events.findIndexOf { it == 'PROCESS_TERMINATE\tSLOW_CONSUMER' }
+            def sourceClosed = events.findIndexOf { it == 'DEPENDENCY_CLOSED\tDUAL_SOURCE' }
+            assert sourceClosed > fastTerminated
+            assert sourceClosed > slowTerminated
+            events.findAll { it.startsWith('ARTIFACT_DELETED\tDUAL_SOURCE\t') }.each { deletion ->
+                assert events.findIndexOf { it == deletion } > sourceClosed
+            }
+        }
+    }
+
+    test("keeps aliased module instances distinct across nested workflow scope") {
+        when {
+            params {
+                scenario = 'scoped_aliases'
+            }
+        }
+        then {
+            assert workflow.success
+            def events = path("$launchDir/nf-gc-events.tsv").readLines()
+            def created = events.findAll { it.startsWith('PROCESS_CREATE\t') }.collect { it.split('\t')[1] }
+            assert created.contains('INNER:WORK_A')
+            assert created.contains('INNER:INNER_SINK')
+            assert created.contains('WORK_B')
+            assert created.contains('OUTER_SINK')
+
+            def edges = events.findAll { it.startsWith('GRAPH_EDGE\t') }.collect { it.substring('GRAPH_EDGE\t'.length()) }.toSet()
+            assert edges.contains('INNER:WORK_A\tINNER:INNER_SINK')
+            assert edges.contains('WORK_B\tOUTER_SINK')
+            assert !edges.contains('INNER:WORK_A\tOUTER_SINK')
+            assert !edges.contains('WORK_B\tINNER:INNER_SINK')
+
+            def aliasDeletes = events.findAll { it.startsWith('ARTIFACT_DELETED\tINNER:WORK_A\t') || it.startsWith('ARTIFACT_DELETED\tWORK_B\t') }
+            assert aliasDeletes.size() == 2
+            aliasDeletes.each { event ->
+                assert !java.nio.file.Files.exists(path(event.split('\t', 3)[2]), java.nio.file.LinkOption.NOFOLLOW_LINKS)
+            }
+        }
+    }
+
+    test("closes a zero-task process graph without inventing artifacts") {
+        when {
+            params {
+                scenario = 'empty_channel'
+            }
+        }
+        then {
+            assert workflow.success
+            assert workflow.trace.tasks().size() == 0
+            def events = path("$launchDir/nf-gc-events.tsv").readLines()
+            assert events.contains('GRAPH_EDGE\tZERO_TASK\tZERO_SINK')
+            assert events.count { it == 'DEPENDENCY_CLOSED\tZERO_TASK' } == 1
+            assert events.count { it == 'DEPENDENCY_CLOSED\tZERO_SINK' } == 1
+            assert !events.any { it.startsWith('ARTIFACT_TRACKED\tZERO_TASK\t') }
+            assert !events.any { it.startsWith('ARTIFACT_DELETED\tZERO_TASK\t') }
+            assert !events.any { it.startsWith('ARTIFACT_DELETE_FAILED\t') }
+        }
+    }
+}

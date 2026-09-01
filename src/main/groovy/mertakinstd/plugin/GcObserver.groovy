@@ -68,7 +68,7 @@ class GcObserver implements TraceObserverV2 {
 
         this.processGraph = GcProcessGraph.from(session.dag)
         this.dependencyState = new GcDependencyState(processGraph)
-        this.artifactRegistry = new GcArtifactRegistry(processGraph)
+        this.artifactRegistry = new GcArtifactRegistry(processGraph, session)
         recordGraph(processGraph)
         log.debug "nf-gc flow begun with ${processGraph.processes.size()} processes"
     }
@@ -91,12 +91,22 @@ class GcObserver implements TraceObserverV2 {
 
         for( TaskProcessor closed : dependencyState.onProcessTerminate(process) ) {
             record('DEPENDENCY_CLOSED', closed.name)
-            recordDeletions(closed, artifactRegistry.onDependencyClosed(closed))
+            recordDeletions(artifactRegistry.onDependencyClosed(closed))
         }
 
         log.debug "nf-gc process terminated: ${process.name}"
     }
 
+
+    @Override
+    void onTaskStart(TaskEvent event) {
+        if( artifactRegistry == null )
+            return
+
+        final TaskRun task = event?.handler?.task
+        if( task != null )
+            artifactRegistry.onTaskStart(task)
+    }
 
     @Override
     void onTaskComplete(TaskEvent event) {
@@ -114,7 +124,10 @@ class GcObserver implements TraceObserverV2 {
         for( Path path : update.tracked )
             record('ARTIFACT_TRACKED', "${task.processor.name}\t${path}".toString())
 
-        recordDeletions(task.processor, update.deletions)
+        for( Path path : update.held )
+            record('ARTIFACT_HOLD', "${task.processor.name}\t${path}".toString())
+
+        recordDeletions(update.deletions)
     }
 
     @Override
@@ -132,7 +145,10 @@ class GcObserver implements TraceObserverV2 {
 
     @Override
     void onWorkflowOutput(WorkflowOutputEvent event) {
-        record('WORKFLOW_OUTPUT')
+        final String detail = event == null
+            ? null
+            : "${event.name ?: '<unnamed>'}\t${event.value ?: ''}".toString()
+        record('WORKFLOW_OUTPUT', detail)
         log.debug "nf-gc workflow output completed: ${event}"
     }
 
@@ -159,9 +175,9 @@ class GcObserver implements TraceObserverV2 {
     }
 
 
-    private void recordDeletions(TaskProcessor process, Collection<GcArtifactRegistry.DeletionResult> results) {
+    private void recordDeletions(Collection<GcArtifactRegistry.DeletionResult> results) {
         for( GcArtifactRegistry.DeletionResult result : results ) {
-            final String detail = "${process.name}\t${result.path}".toString()
+            final String detail = "${result.process.name}\t${result.path}".toString()
             switch( result.status ) {
             case GcArtifactRegistry.DeleteStatus.DELETED:
                 record('ARTIFACT_DELETED', detail)

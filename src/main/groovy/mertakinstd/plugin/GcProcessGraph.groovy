@@ -24,6 +24,7 @@ import java.util.Map
 import java.util.Set
 
 import groovy.transform.CompileStatic
+import groovy.transform.PackageScope
 import nextflow.dag.DAG
 import nextflow.processor.TaskProcessor
 
@@ -41,7 +42,8 @@ final class GcProcessGraph {
     private final Map<TaskProcessor, Set<TaskProcessor>> consumers
     private final Map<TaskProcessor, Set<TaskProcessor>> producers
 
-    private GcProcessGraph(
+    @PackageScope
+    GcProcessGraph(
         Map<TaskProcessor, Set<TaskProcessor>> consumers,
         Map<TaskProcessor, Set<TaskProcessor>> producers
     ) {

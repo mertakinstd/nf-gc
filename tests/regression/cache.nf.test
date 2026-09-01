@@ -1,0 +1,22 @@
+nextflow_pipeline {
+
+    name "nf-gc cached-task safety"
+    script "tests/regression/cache.nf"
+
+    test("keeps a task restored from storeDir cache") {
+        when {
+            params {
+                store_dir = "$launchDir/store-cache"
+            }
+        }
+        then {
+            assert workflow.success
+            def events = path("$launchDir/nf-gc-events.tsv").readLines()
+            assert events.contains('ARTIFACT_KEEP\tSTORED_CACHE\tCACHED')
+            assert !events.any { it.startsWith('ARTIFACT_TRACKED\tSTORED_CACHE\t') }
+            assert !events.any { it.startsWith('ARTIFACT_DELETED\tSTORED_CACHE\t') }
+            assert path("$launchDir/store-cache/cached.txt").exists()
+            assert path("$launchDir/store-cache/cached.txt").text == 'prebuilt-cache\n'
+        }
+    }
+}
