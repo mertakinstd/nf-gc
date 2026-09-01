@@ -18,7 +18,7 @@ test:
 
 # Install the plugin into local nextflow plugins dir
 install:
-	$(GRADLE) install
+	$(GRADLE) installPlugin
 
 # Publish the plugin
 release:

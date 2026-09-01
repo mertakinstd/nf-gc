@@ -34,11 +34,8 @@ import nextflow.trace.event.FilePublishEvent
 import nextflow.trace.event.WorkflowOutputEvent
 
 /**
- * Observes the workflow lifecycle used by nf-gc.
- *
- * This class deliberately performs no garbage collection yet. The first
- * implementation milestone is to verify the lifecycle boundaries exposed by
- * TraceObserverV2 before attaching deletion semantics to them.
+ * Observes the workflow lifecycle used by nf-gc and coordinates process
+ * dependency closure with conservative artifact reclamation.
  */
 @Slf4j
 @CompileStatic

@@ -2,23 +2,21 @@
 
 ## Summary
 
-`nf-gc` is a Nextflow plugin scaffolded from the official plugin
-template. Out of the box it provides:
-
-- A custom function `sayHello` that can be imported into Nextflow scripts.
-- A workflow observer that reacts to pipeline lifecycle events (start and
-  completion).
-
-Replace this section with a description of what your plugin actually does.
-
-Note: The **Summary**, **Get Started**, **Examples**, and **License** sections are
-mandatory: they are required by the Nextflow Registry, which uses this
-file as the plugin description. The **Plugin development** section below is
-guidance for working on the plugin and can be removed before publishing.
+`nf-gc` is a Nextflow plugin for conservative, shallow garbage collection of workflow artifacts. It tracks successful non-cached task outputs owned by the Nextflow work directory and reclaims eligible intermediates after their producer becomes dependency-closed. When ownership or retention cannot be established safely, the artifact is kept.
 
 ## Get Started
 
-Enable the plugin in your pipeline `nextflow.config`:
+For local development, bootstrap the pinned repository toolchain and install the plugin:
+
+```bash
+./scripts/bootstrap-dev.sh
+source env.sh
+
+./gradlew clean test
+./gradlew installPlugin
+```
+
+A pipeline can then enable the locally installed plugin in `nextflow.config`:
 
 ```groovy
 plugins {
@@ -26,61 +24,38 @@ plugins {
 }
 ```
 
-Nextflow downloads the plugin from the Nextflow Registry the first time
-the pipeline runs.
+No nf-gc-specific pipeline configuration is required. The development environment uses Eclipse Temurin JDK 21, Nextflow 26.04.6, and nf-test 0.9.5. Docker is not required for the core plugin development loop.
 
 ## Examples
 
-Import and call the `sayHello` function from a Nextflow script:
-
-```nextflow
-include { sayHello } from 'plugin/nf-gc'
-
-workflow {
-    channel.of('Mundo', 'World').map { target -> sayHello(target) }
-}
-```
-
-The bundled observer prints a message when the pipeline starts and completes,
-so running any pipeline with the plugin enabled produces:
-
-```
-Pipeline is starting! 🚀
-Pipeline complete! 👋
-```
-
-## Plugin development
-
-This project was created from the [Nextflow plugin template](https://www.nextflow.io/docs/latest/guides/gradle-plugin.html#gradle-plugin-create).
-
-### Building
-
-To build the plugin:
+The repository includes synthetic workflows that exercise fan-out, shared inputs, joins, pass-through paths, publication behavior, failures, caching, and RNA-seq-like topology:
 
 ```bash
-make assemble
+nf-test test tests --verbose
 ```
 
-### Testing with Nextflow
+The regression tests use real filesystem state to verify both reclamation and conservative retention. For example, an eligible intermediate is reclaimed only after its producer and immediate downstream consumers have terminated; terminal or publication-sensitive outputs are retained.
 
-The plugin can be tested without a local Nextflow installation:
+## Scope and compatibility
 
-1. Build and install the plugin to your local Nextflow installation: `make install`
-2. Run a pipeline with the plugin: `nextflow run hello -plugins nf-gc@0.1.0`
+- Minimum Nextflow version: `26.04.0`.
+- Validated development/runtime version: `26.04.6`.
+- Collection is shallow and limited to task outputs owned by the Nextflow work directory.
+- Cached tasks, failed or unknown task states, terminal process outputs, and outputs outside task work ownership are kept.
+- Any process `publishDir` currently keeps all outputs from that task, including partial or disabled publication configurations.
+- Any configured workflow output currently keeps intermediate task outputs for the run; artifact-level workflow-output provenance is not yet modelled.
+- Staged external inputs are never acquired as owned artifacts. Re-emitted upstream artifacts are held until the relay dependency closes.
+- Filesystem deletion does not follow symbolic links.
+- Reclaimed artifacts are not guaranteed to remain available for a later `-resume` run.
 
-### Publishing
+The retention policy is intentionally conservative: uncertainty resolves to KEEP rather than DELETE.
 
-Plugins can be published to a central Nextflow registry to make them accessible to the Nextflow community.
+## Contributing
 
-Follow these steps to publish the plugin to the Nextflow Registry:
-
-1. Create a file named `$HOME/.gradle/gradle.properties`, where `$HOME` is your home directory. Add the following properties:
-    * `npr.apiKey`: Your Nextflow Registry access token.
-2. Package your plugin and publish it to the registry: `make release`.
+- [Contribution guide](docs/contributing.md)
+- [Reporting issues](docs/issues.md)
+- [Testing](docs/testing.md)
 
 ## License
 
-Apache License 2.0. See the [`COPYING`](COPYING) file for details.
-
-Note: The above license is given for guidance only; however the Nextflow Registry
-requires the plugin to include an OSS (open source software) license.
+Licensed under the Apache License 2.0. See [LICENSE](LICENSE) for the full license text.
