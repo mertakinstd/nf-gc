@@ -9,6 +9,26 @@ nextflow_pipeline {
             assert workflow.success
             assert workflow.trace.failed().size() == 0
             assert workflow.trace.tasks().size() == 9
+
+            def events = path("$launchDir/nf-gc-events.tsv").readLines()
+
+            assert events.count { it == "PROCESS_CREATE\tPRODUCER" } == 1
+            assert events.count { it == "PROCESS_CREATE\tLEFT" } == 1
+            assert events.count { it == "PROCESS_CREATE\tRIGHT" } == 1
+
+            assert events.count { it == "PROCESS_TERMINATE\tPRODUCER" } == 1
+            assert events.count { it == "PROCESS_TERMINATE\tLEFT" } == 1
+            assert events.count { it == "PROCESS_TERMINATE\tRIGHT" } == 1
+
+            def producerTerminated = events.indexOf("PROCESS_TERMINATE\tPRODUCER")
+            def leftTerminated = events.indexOf("PROCESS_TERMINATE\tLEFT")
+            def rightTerminated = events.indexOf("PROCESS_TERMINATE\tRIGHT")
+
+            assert producerTerminated < leftTerminated
+            assert producerTerminated < rightTerminated
+
+            assert events.first() == "FLOW_CREATE"
+            assert events.last() == "FLOW_COMPLETE"
         }
     }
 }

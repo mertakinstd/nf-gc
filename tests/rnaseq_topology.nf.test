@@ -1,0 +1,82 @@
+nextflow_pipeline {
+
+    name "nf-gc rnaseq-like topology"
+    script "tests/rnaseq_topology.nf"
+
+    test("handles shared index, fan-out, join and aggregation") {
+
+        when {
+            params {
+                extra_qc = true
+            }
+        }
+
+        then {
+            assert workflow.success
+            assert workflow.trace.failed().size() == 0
+            assert workflow.trace.tasks().size() == 26
+
+            def events = path("$launchDir/nf-gc-events.tsv").readLines()
+
+            def processes = [
+                'BUILD_INDEX',
+                'TRIM_READS',
+                'ALIGN',
+                'SORT',
+                'ALIGN_QC',
+                'QUANT',
+                'FEATURE_COUNTS',
+                'EXTRA_QC',
+                'MERGE_COUNTS',
+                'REPORT'
+            ]
+
+            processes.each { processName ->
+                assert events.count { it == "PROCESS_CREATE\t${processName}" } == 1
+                assert events.count { it == "PROCESS_TERMINATE\t${processName}" } == 1
+            }
+
+            def terminated = { processName ->
+                events.findIndexOf { it == "PROCESS_TERMINATE\t${processName}" }
+            }
+
+            assert terminated('BUILD_INDEX') < terminated('ALIGN')
+            assert terminated('BUILD_INDEX') < terminated('QUANT')
+            assert terminated('ALIGN') < terminated('SORT')
+            assert terminated('ALIGN') < terminated('ALIGN_QC')
+            assert terminated('ALIGN') < terminated('QUANT')
+            assert terminated('SORT') < terminated('FEATURE_COUNTS')
+            assert terminated('SORT') < terminated('EXTRA_QC')
+            assert terminated('FEATURE_COUNTS') < terminated('MERGE_COUNTS')
+            assert terminated('QUANT') < terminated('MERGE_COUNTS')
+            assert terminated('MERGE_COUNTS') < terminated('REPORT')
+            assert terminated('ALIGN_QC') < terminated('REPORT')
+            assert terminated('EXTRA_QC') < terminated('REPORT')
+
+            assert events.first() == 'FLOW_CREATE'
+            assert events.last() == 'FLOW_COMPLETE'
+        }
+    }
+
+    test("handles an optional branch that is not instantiated") {
+
+        when {
+            params {
+                extra_qc = false
+            }
+        }
+
+        then {
+            assert workflow.success
+            assert workflow.trace.failed().size() == 0
+            assert workflow.trace.tasks().size() == 23
+
+            def events = path("$launchDir/nf-gc-events.tsv").readLines()
+
+            assert !events.contains('PROCESS_CREATE\tEXTRA_QC')
+            assert !events.contains('PROCESS_TERMINATE\tEXTRA_QC')
+            assert events.contains('PROCESS_TERMINATE\tREPORT')
+            assert events.last() == 'FLOW_COMPLETE'
+        }
+    }
+}

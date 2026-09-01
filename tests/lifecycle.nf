@@ -22,6 +22,7 @@ process LEFT {
 
     script:
     """
+    sleep 1
     cp "$input_file" "left-${input_file}"
     """
 }
@@ -35,6 +36,7 @@ process RIGHT {
 
     script:
     """
+    sleep 2
     cp "$input_file" "right-${input_file}"
     """
 }

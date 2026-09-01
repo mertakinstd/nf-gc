@@ -16,6 +16,10 @@
 
 package mertakinstd.plugin
 
+import java.nio.file.Files
+import java.nio.file.Path
+import java.nio.file.StandardOpenOption
+
 import groovy.transform.CompileStatic
 import groovy.util.logging.Slf4j
 import nextflow.Session
@@ -35,38 +39,93 @@ import nextflow.trace.event.WorkflowOutputEvent
 @CompileStatic
 class GcObserver implements TraceObserverV2 {
 
+    private Path traceFile
+
     @Override
     void onFlowCreate(Session session) {
+        configureTestTrace(session)
+        initializeTrace()
+        record('FLOW_CREATE')
         log.debug 'nf-gc flow created'
     }
 
     @Override
     void onFlowBegin() {
+        record('FLOW_BEGIN')
         log.debug 'nf-gc flow begun'
     }
 
     @Override
     void onProcessCreate(TaskProcessor process) {
+        record('PROCESS_CREATE', process.name)
         log.debug "nf-gc process created: ${process.name}"
     }
 
     @Override
     void onProcessTerminate(TaskProcessor process) {
+        record('PROCESS_TERMINATE', process.name)
         log.debug "nf-gc process terminated: ${process.name}"
     }
 
     @Override
     void onFilePublish(FilePublishEvent event) {
+        record('FILE_PUBLISH')
         log.debug "nf-gc file published: ${event}"
     }
 
     @Override
     void onWorkflowOutput(WorkflowOutputEvent event) {
+        record('WORKFLOW_OUTPUT')
         log.debug "nf-gc workflow output completed: ${event}"
     }
 
     @Override
     void onFlowComplete() {
+        record('FLOW_COMPLETE')
         log.debug 'nf-gc flow completed'
+    }
+
+    /**
+     * Enables a test-only lifecycle trace through Nextflow's standard env
+     * scope. This is intentionally not part of the nf-gc public config API.
+     */
+    private void configureTestTrace(Session session) {
+        final Object envConfig = session.config.get('env')
+        if( !(envConfig instanceof Map) )
+            return
+
+        final Object enabled = ((Map) envConfig).get('NF_GC_TEST_TRACE')
+        if( enabled == null || !Boolean.parseBoolean(enabled.toString()) )
+            return
+
+        this.traceFile = session.workDir.parent.resolve('nf-gc-events.tsv')
+    }
+
+    private void initializeTrace() {
+        if( traceFile == null )
+            return
+
+        Files.writeString(
+            traceFile,
+            '',
+            StandardOpenOption.CREATE,
+            StandardOpenOption.TRUNCATE_EXISTING
+        )
+    }
+
+    private synchronized void record(String event, String detail = null) {
+        if( traceFile == null )
+            return
+
+        final String line = detail == null
+            ? "${event}\n"
+            : "${event}\t${detail}\n"
+
+        Files.writeString(
+            traceFile,
+            line,
+            StandardOpenOption.CREATE,
+            StandardOpenOption.APPEND
+        )
     }
 }
