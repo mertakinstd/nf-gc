@@ -19,11 +19,16 @@ package mertakinstd.plugin
 import java.nio.file.Files
 import java.nio.file.Path
 import java.nio.file.StandardOpenOption
+import java.util.ArrayList
+import java.util.Collections
+import java.util.List
 
 import groovy.transform.CompileStatic
 import groovy.util.logging.Slf4j
 import nextflow.Session
 import nextflow.processor.TaskProcessor
+import nextflow.processor.TaskRun
+import nextflow.trace.event.TaskEvent
 import nextflow.trace.TraceObserverV2
 import nextflow.trace.event.FilePublishEvent
 import nextflow.trace.event.WorkflowOutputEvent
@@ -40,9 +45,14 @@ import nextflow.trace.event.WorkflowOutputEvent
 class GcObserver implements TraceObserverV2 {
 
     private Path traceFile
+    private Session session
+    private GcProcessGraph processGraph
+    private GcDependencyState dependencyState
+    private GcArtifactRegistry artifactRegistry
 
     @Override
     void onFlowCreate(Session session) {
+        this.session = session
         configureTestTrace(session)
         initializeTrace()
         record('FLOW_CREATE')
@@ -52,7 +62,15 @@ class GcObserver implements TraceObserverV2 {
     @Override
     void onFlowBegin() {
         record('FLOW_BEGIN')
-        log.debug 'nf-gc flow begun'
+
+        if( session == null )
+            throw new IllegalStateException('nf-gc flow began before session initialization')
+
+        this.processGraph = GcProcessGraph.from(session.dag)
+        this.dependencyState = new GcDependencyState(processGraph)
+        this.artifactRegistry = new GcArtifactRegistry(processGraph)
+        recordGraph(processGraph)
+        log.debug "nf-gc flow begun with ${processGraph.processes.size()} processes"
     }
 
     @Override
@@ -64,7 +82,46 @@ class GcObserver implements TraceObserverV2 {
     @Override
     void onProcessTerminate(TaskProcessor process) {
         record('PROCESS_TERMINATE', process.name)
+
+        if( dependencyState == null || processGraph == null || !processGraph.contains(process) ) {
+            record('DEPENDENCY_UNKNOWN', process.name)
+            log.warn "nf-gc ignored termination for process outside the dependency graph: ${process.name}"
+            return
+        }
+
+        for( TaskProcessor closed : dependencyState.onProcessTerminate(process) ) {
+            record('DEPENDENCY_CLOSED', closed.name)
+            recordDeletions(closed, artifactRegistry.onDependencyClosed(closed))
+        }
+
         log.debug "nf-gc process terminated: ${process.name}"
+    }
+
+
+    @Override
+    void onTaskComplete(TaskEvent event) {
+        if( artifactRegistry == null )
+            return
+
+        final TaskRun task = event?.handler?.task
+        if( task == null )
+            return
+
+        final GcArtifactRegistry.Update update = artifactRegistry.onTaskComplete(task)
+        if( update.keepReason != null )
+            record('ARTIFACT_KEEP', "${task.processor?.name ?: '<unknown>'}\t${update.keepReason}".toString())
+
+        for( Path path : update.tracked )
+            record('ARTIFACT_TRACKED', "${task.processor.name}\t${path}".toString())
+
+        recordDeletions(task.processor, update.deletions)
+    }
+
+    @Override
+    void onTaskCached(TaskEvent event) {
+        final TaskRun task = event?.handler?.task
+        if( task != null )
+            record('ARTIFACT_KEEP', "${task.processor?.name ?: '<unknown>'}\t${GcArtifactRegistry.KEEP_CACHED}".toString())
     }
 
     @Override
@@ -99,6 +156,41 @@ class GcObserver implements TraceObserverV2 {
             return
 
         this.traceFile = session.workDir.parent.resolve('nf-gc-events.tsv')
+    }
+
+
+    private void recordDeletions(TaskProcessor process, Collection<GcArtifactRegistry.DeletionResult> results) {
+        for( GcArtifactRegistry.DeletionResult result : results ) {
+            final String detail = "${process.name}\t${result.path}".toString()
+            switch( result.status ) {
+            case GcArtifactRegistry.DeleteStatus.DELETED:
+                record('ARTIFACT_DELETED', detail)
+                break
+            case GcArtifactRegistry.DeleteStatus.MISSING:
+                record('ARTIFACT_MISSING', detail)
+                break
+            case GcArtifactRegistry.DeleteStatus.FAILED:
+                record('ARTIFACT_DELETE_FAILED', "${detail}\t${result.error ?: ''}".toString())
+                log.warn "nf-gc failed to delete artifact ${result.path}: ${result.error ?: 'unknown error'}"
+                break
+            }
+        }
+    }
+
+    private void recordGraph(GcProcessGraph graph) {
+        if( traceFile == null )
+            return
+
+        final List<String> edges = new ArrayList<>()
+        for( TaskProcessor producer : graph.processes ) {
+            for( TaskProcessor consumer : graph.consumersOf(producer) ) {
+                edges.add("${producer.name}\t${consumer.name}".toString())
+            }
+        }
+
+        Collections.sort(edges)
+        for( String edge : edges )
+            record('GRAPH_EDGE', edge)
     }
 
     private void initializeTrace() {

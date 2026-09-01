@@ -1,6 +1,7 @@
 nextflow.enable.dsl=2
 
 params.extra_qc = true
+params.publish_dir = null
 
 process BUILD_INDEX {
     input:
@@ -62,6 +63,8 @@ process SORT {
 }
 
 process ALIGN_QC {
+    publishDir path: (params.publish_dir ?: "${projectDir}/published"), mode: 'copy', enabled: params.publish_dir != null
+
     input:
     tuple val(sample), path(bam)
 

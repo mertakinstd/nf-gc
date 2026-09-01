@@ -8,6 +8,7 @@ nextflow_pipeline {
         when {
             params {
                 extra_qc = true
+                publish_dir = "$launchDir/published"
             }
         }
 
@@ -36,9 +37,75 @@ nextflow_pipeline {
                 assert events.count { it == "PROCESS_TERMINATE\t${processName}" } == 1
             }
 
+            def graphEdges = events
+                .findAll { it.startsWith('GRAPH_EDGE\t') }
+                .collect { it.substring('GRAPH_EDGE\t'.length()) }
+                .toSet()
+
+            assert graphEdges == [
+                'BUILD_INDEX\tALIGN',
+                'BUILD_INDEX\tQUANT',
+                'TRIM_READS\tALIGN',
+                'ALIGN\tSORT',
+                'ALIGN\tALIGN_QC',
+                'ALIGN\tQUANT',
+                'SORT\tFEATURE_COUNTS',
+                'SORT\tEXTRA_QC',
+                'FEATURE_COUNTS\tMERGE_COUNTS',
+                'QUANT\tMERGE_COUNTS',
+                'MERGE_COUNTS\tREPORT',
+                'ALIGN_QC\tREPORT',
+                'EXTRA_QC\tREPORT'
+            ].toSet()
+
             def terminated = { processName ->
                 events.findIndexOf { it == "PROCESS_TERMINATE\t${processName}" }
             }
+            def dependencyClosed = { processName ->
+                events.findIndexOf { it == "DEPENDENCY_CLOSED\t${processName}" }
+            }
+
+            processes.each { processName ->
+                assert events.count { it == "DEPENDENCY_CLOSED\t${processName}" } == 1
+                assert dependencyClosed(processName) > terminated(processName)
+            }
+
+            graphEdges.each { edge ->
+                def (producer, consumer) = edge.split('\t')
+                assert dependencyClosed(producer) > terminated(consumer)
+            }
+
+            def trackedProcesses = events
+                .findAll { it.startsWith('ARTIFACT_TRACKED\t') }
+                .collect { it.split('\t')[1] }
+                .toSet()
+            def deletedProcesses = events
+                .findAll { it.startsWith('ARTIFACT_DELETED\t') }
+                .collect { it.split('\t')[1] }
+                .toSet()
+
+            assert trackedProcesses == [
+                'BUILD_INDEX',
+                'TRIM_READS',
+                'ALIGN',
+                'SORT',
+                'QUANT',
+                'FEATURE_COUNTS',
+                'EXTRA_QC',
+                'MERGE_COUNTS'
+            ].toSet()
+            assert deletedProcesses == trackedProcesses
+            events.findAll { it.startsWith('ARTIFACT_DELETED\t') }.each { deletion ->
+                def processName = deletion.split('\t')[1]
+                assert events.findIndexOf { it == deletion } > dependencyClosed(processName)
+            }
+            assert events.contains('ARTIFACT_KEEP\tALIGN_QC\tPUBLISH_DIR')
+            assert events.contains('ARTIFACT_KEEP\tREPORT\tTERMINAL')
+            assert !events.any { it.startsWith('ARTIFACT_DELETE_FAILED\t') }
+            assert !events.any { it.startsWith('ARTIFACT_MISSING\t') }
+            assert path("$launchDir/published/sample1.align_qc.txt").exists()
+            assert path("$launchDir/published/sample2.align_qc.txt").exists()
+            assert path("$launchDir/published/sample3.align_qc.txt").exists()
 
             assert terminated('BUILD_INDEX') < terminated('ALIGN')
             assert terminated('BUILD_INDEX') < terminated('QUANT')
@@ -63,6 +130,7 @@ nextflow_pipeline {
         when {
             params {
                 extra_qc = false
+                publish_dir = "$launchDir/published"
             }
         }
 
@@ -73,6 +141,85 @@ nextflow_pipeline {
 
             def events = path("$launchDir/nf-gc-events.tsv").readLines()
 
+            def graphEdges = events
+                .findAll { it.startsWith('GRAPH_EDGE\t') }
+                .collect { it.substring('GRAPH_EDGE\t'.length()) }
+                .toSet()
+
+            assert graphEdges == [
+                'BUILD_INDEX\tALIGN',
+                'BUILD_INDEX\tQUANT',
+                'TRIM_READS\tALIGN',
+                'ALIGN\tSORT',
+                'ALIGN\tALIGN_QC',
+                'ALIGN\tQUANT',
+                'SORT\tFEATURE_COUNTS',
+                'FEATURE_COUNTS\tMERGE_COUNTS',
+                'QUANT\tMERGE_COUNTS',
+                'MERGE_COUNTS\tREPORT',
+                'ALIGN_QC\tREPORT'
+            ].toSet()
+
+            def processes = [
+                'BUILD_INDEX',
+                'TRIM_READS',
+                'ALIGN',
+                'SORT',
+                'ALIGN_QC',
+                'QUANT',
+                'FEATURE_COUNTS',
+                'MERGE_COUNTS',
+                'REPORT'
+            ]
+            def terminated = { processName ->
+                events.findIndexOf { it == "PROCESS_TERMINATE\t${processName}" }
+            }
+            def dependencyClosed = { processName ->
+                events.findIndexOf { it == "DEPENDENCY_CLOSED\t${processName}" }
+            }
+
+            processes.each { processName ->
+                assert events.count { it == "DEPENDENCY_CLOSED\t${processName}" } == 1
+                assert dependencyClosed(processName) > terminated(processName)
+            }
+
+            graphEdges.each { edge ->
+                def (producer, consumer) = edge.split('\t')
+                assert dependencyClosed(producer) > terminated(consumer)
+            }
+
+            def trackedProcesses = events
+                .findAll { it.startsWith('ARTIFACT_TRACKED\t') }
+                .collect { it.split('\t')[1] }
+                .toSet()
+            def deletedProcesses = events
+                .findAll { it.startsWith('ARTIFACT_DELETED\t') }
+                .collect { it.split('\t')[1] }
+                .toSet()
+
+            assert trackedProcesses == [
+                'BUILD_INDEX',
+                'TRIM_READS',
+                'ALIGN',
+                'SORT',
+                'QUANT',
+                'FEATURE_COUNTS',
+                'MERGE_COUNTS'
+            ].toSet()
+            assert deletedProcesses == trackedProcesses
+            events.findAll { it.startsWith('ARTIFACT_DELETED\t') }.each { deletion ->
+                def processName = deletion.split('\t')[1]
+                assert events.findIndexOf { it == deletion } > dependencyClosed(processName)
+            }
+            assert events.contains('ARTIFACT_KEEP\tALIGN_QC\tPUBLISH_DIR')
+            assert events.contains('ARTIFACT_KEEP\tREPORT\tTERMINAL')
+            assert !events.any { it.startsWith('ARTIFACT_DELETE_FAILED\t') }
+            assert !events.any { it.startsWith('ARTIFACT_MISSING\t') }
+            assert path("$launchDir/published/sample1.align_qc.txt").exists()
+            assert path("$launchDir/published/sample2.align_qc.txt").exists()
+            assert path("$launchDir/published/sample3.align_qc.txt").exists()
+
+            assert !events.contains('DEPENDENCY_CLOSED\tEXTRA_QC')
             assert !events.contains('PROCESS_CREATE\tEXTRA_QC')
             assert !events.contains('PROCESS_TERMINATE\tEXTRA_QC')
             assert events.contains('PROCESS_TERMINATE\tREPORT')
