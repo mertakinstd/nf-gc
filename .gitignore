@@ -9,3 +9,7 @@ work
 
 .tools/
 .nxf/
+
+.nf-test/
+
+.nf-test.log

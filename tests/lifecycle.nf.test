@@ -1,0 +1,14 @@
+nextflow_pipeline {
+
+    name "nf-gc lifecycle fan-out"
+    script "tests/lifecycle.nf"
+
+    test("runs a producer with two downstream consumers") {
+
+        then {
+            assert workflow.success
+            assert workflow.trace.failed().size() == 0
+            assert workflow.trace.tasks().size() == 9
+        }
+    }
+}
