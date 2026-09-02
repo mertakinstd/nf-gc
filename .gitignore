@@ -13,3 +13,6 @@ work
 .nf-test/
 
 .nf-test.log
+
+# Never commit Nextflow Registry credentials
+gradle.properties

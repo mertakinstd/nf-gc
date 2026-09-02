@@ -7,7 +7,7 @@ Contributions should keep `nf-gc` small, conservative, and explicit about filesy
 The repository uses a repo-local, pinned toolchain so development does not depend on whichever Java, Nextflow, or nf-test version happens to be installed on the host.
 
 ```bash
-git clone <repository-url>
+git clone https://github.com/mertakinstd/nf-gc.git
 cd nf-gc
 
 ./scripts/bootstrap-dev.sh
@@ -24,7 +24,7 @@ Downloads are checksum-verified. `env.sh` sets `JAVA_HOME`, prepends the repo-lo
 
 The bootstrap does not install system packages and never uses `sudo`, `apt`, `dnf`, Homebrew, or another package manager. Linux and macOS are supported on x86_64 and arm64/aarch64.
 
-Docker is optional. It is not required for the core Gradle, synthetic Nextflow, or nf-test development loop. Container-backed integration tests may require Docker or another container runtime in the future.
+Docker is optional. It is not required for the core Gradle, synthetic Nextflow, or nf-test development loop. External integration validation, such as an nf-core pipeline run, may require Docker or another container runtime.
 
 ## Build and test
 
@@ -71,6 +71,32 @@ Toolchain upgrades are deliberate compatibility changes. When updating Java, Nex
 5. Update compatibility or contributor documentation if the supported environment changes.
 
 Do not replace pinned versions with `latest` URLs.
+
+## Releasing
+
+Public releases are tag-driven. The plugin version in `build.gradle` is paired with the corresponding `v`-prefixed Git tag, for example plugin `0.1.0` is released from tag `v0.1.0`.
+
+The GitHub Actions workflow is the release gate:
+
+1. Update `version` in `build.gradle` and add the release notes to `CHANGELOG.md`.
+2. Run `./test.sh` locally.
+3. Commit and push the release candidate, then wait for the `test` job to pass on that exact commit.
+4. Confirm that the plugin claim is ready in the Nextflow Registry and that the repository Actions secret `NPR_API_KEY` is configured.
+5. Tag the tested commit and push the tag, for example:
+
+   ```bash
+   git tag -a v0.1.0 -m "nf-gc 0.1.0"
+   git push origin v0.1.0
+   ```
+
+A pushed `v*` tag runs the same test job again. The `release` job has `needs: test`, so it cannot publish unless that tag's exact commit passes the full regression suite. The release job also verifies that the tag exactly matches the plugin version before it:
+
+- publishes the immutable plugin artifact to the Nextflow Registry using `NPR_API_KEY`;
+- creates the matching GitHub Release from the corresponding `CHANGELOG.md` section.
+
+Do not move or reuse a published version tag. After release, verify that a clean Nextflow environment can resolve the released plugin version from the Registry.
+
+Registry credentials belong in GitHub Actions secrets or another external secret store. Never commit an API key or a repository-local `gradle.properties`.
 
 ## Before submitting a pull request
 

@@ -8,6 +8,7 @@ nextflowPlugin {
     nextflowVersion = '26.04.0'
 
     provider = 'mertakinstd'
+    description = 'Conservative in-run garbage collection of eligible Nextflow work artifacts'
     className = 'mertakinstd.plugin.GcPlugin'
     extensionPoints = [
         'mertakinstd.plugin.GcObserverFactory'

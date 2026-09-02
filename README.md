@@ -6,17 +6,7 @@
 
 ## Get Started
 
-For local development, bootstrap the pinned repository toolchain and install the plugin:
-
-```bash
-./scripts/bootstrap-dev.sh
-source env.sh
-
-./gradlew clean test
-./gradlew installPlugin
-```
-
-A pipeline can then enable the locally installed plugin in `nextflow.config`:
+Enable the plugin in your pipeline `nextflow.config`:
 
 ```groovy
 plugins {
@@ -24,17 +14,27 @@ plugins {
 }
 ```
 
-No nf-gc-specific pipeline configuration is required. The development environment uses Eclipse Temurin JDK 21, Nextflow 26.04.6, and nf-test 0.9.5. Docker is not required for the core plugin development loop.
+Nextflow downloads the published plugin from the Nextflow Registry when the pipeline runs. No nf-gc-specific pipeline configuration is required.
+
+`nf-gc` requires Nextflow `26.04.0` or newer.
 
 ## Examples
 
-The repository includes synthetic workflows that exercise fan-out, shared inputs, joins, pass-through paths, publication behavior, failures, caching, and RNA-seq-like topology:
+Run any Nextflow pipeline with the plugin enabled, either from `nextflow.config` as above or from the command line:
 
 ```bash
-./test.sh
+nextflow run main.nf -plugins nf-gc@0.1.0
 ```
 
-The regression tests use real filesystem state to verify both reclamation and conservative retention. For example, an eligible intermediate is reclaimed only after its producer and immediate downstream consumers have terminated; terminal or publication-sensitive outputs are retained.
+Eligible intermediate task outputs remain available until their producer process becomes dependency-closed. Publication-sensitive, terminal, cached, failed, external, or otherwise uncertain artifacts are retained conservatively.
+
+For repository development and the full regression suite:
+
+```bash
+./scripts/bootstrap-dev.sh
+source env.sh
+./test.sh
+```
 
 ## Scope and compatibility
 
@@ -50,11 +50,16 @@ The regression tests use real filesystem state to verify both reclamation and co
 
 The retention policy is intentionally conservative: uncertainty resolves to KEEP rather than DELETE.
 
+## Validation
+
+The `0.1.0` behavior contract is covered by 43 functional regression cases against real Nextflow work directories and filesystem state. The plugin has also been integration-tested with `nf-core/rnaseq 3.26.0` using its official test profile, including STAR/Salmon, QC, MultiQC, hard-link publication, and nf-core-style `saveAs` retention gates.
+
 ## Contributing
 
 - [Contribution guide](docs/contributing.md)
 - [Reporting issues](docs/issues.md)
 - [Testing](tests/testing.md)
+- [Changelog](CHANGELOG.md)
 
 ## License
 

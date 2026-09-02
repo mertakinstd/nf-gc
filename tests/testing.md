@@ -14,7 +14,7 @@ When a new behavior is proposed, its functional case is written first. The exist
 2. plugin assembly and repo-local installation;
 3. all 43 nf-test functional cases against real Nextflow work directories and filesystem state.
 
-Cases F41-F43 derive from nf-core/rnaseq 3.26.0 publication semantics and pin both null and non-null `saveAs` branches under the hard-link publication mode used by the pinned Alignment invocation.
+Cases F41-F43 derive from nf-core/rnaseq 3.26.0 publication semantics and pin both null and non-null `saveAs` branches under hard-link publication.
 
 The functional cases below are the externally observable support matrix. Event traces establish lifecycle ordering and classification; filesystem assertions establish the actual retention or deletion result.
 
@@ -104,7 +104,7 @@ Publication retention follows the artifact selected for publication. A `publishD
 
 ### nf-core/rnaseq publication semantics
 
-These cases mirror publication idioms used by nf-core/rnaseq 3.26.0 and by the pinned Alignment invocation: pipeline-wide filename filtering through `saveAs`, parameter-gated STAR intermediates, and hard-link publication. For link-family modes, nf-gc uses Nextflow's actual synchronous file-publication event instead of evaluating the `saveAs` closure a second time. Async publication with `saveAs` remains conservative.
+These cases mirror publication idioms used by nf-core/rnaseq 3.26.0: pipeline-wide filename filtering through `saveAs`, parameter-gated STAR intermediates, and hard-link publication. For link-family modes, nf-gc uses Nextflow's actual synchronous file-publication event instead of evaluating the `saveAs` closure a second time. Async publication with `saveAs` remains conservative.
 
 | ID | Supported situation | Expected nf-gc behavior | Evidence |
 | --- | --- | --- | --- |
