@@ -31,7 +31,7 @@ No nf-gc-specific pipeline configuration is required. The development environmen
 The repository includes synthetic workflows that exercise fan-out, shared inputs, joins, pass-through paths, publication behavior, failures, caching, and RNA-seq-like topology:
 
 ```bash
-nf-test test tests --verbose
+./test.sh
 ```
 
 The regression tests use real filesystem state to verify both reclamation and conservative retention. For example, an eligible intermediate is reclaimed only after its producer and immediate downstream consumers have terminated; terminal or publication-sensitive outputs are retained.
@@ -42,7 +42,7 @@ The regression tests use real filesystem state to verify both reclamation and co
 - Validated development/runtime version: `26.04.6`.
 - Collection is shallow and limited to task outputs owned by the Nextflow work directory.
 - Cached tasks, failed or unknown task states, terminal process outputs, and outputs outside task work ownership are kept.
-- Any process `publishDir` currently keeps all outputs from that task, including partial or disabled publication configurations.
+- `publishDir` protection is artifact-level for pattern-selected outputs. For synchronous link-family publication, observed Nextflow publication events also resolve `saveAs` selection without re-running user closures; async `saveAs`, disabled publication, and otherwise ambiguous publication remain conservative.
 - Any configured workflow output currently keeps intermediate task outputs for the run; artifact-level workflow-output provenance is not yet modelled.
 - Staged external inputs are never acquired as owned artifacts. Re-emitted upstream artifacts are held until the relay dependency closes.
 - Filesystem deletion does not follow symbolic links.
@@ -54,7 +54,7 @@ The retention policy is intentionally conservative: uncertainty resolves to KEEP
 
 - [Contribution guide](docs/contributing.md)
 - [Reporting issues](docs/issues.md)
-- [Testing](docs/testing.md)
+- [Testing](tests/testing.md)
 
 ## License
 

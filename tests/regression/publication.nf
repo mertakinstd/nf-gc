@@ -5,6 +5,7 @@ params.publish_dir = null
 params.publish_dir_2 = null
 params.store_dir = null
 params.publish_mode = 'copy'
+params.save_align_intermeds = false
 
 
 process PUBLISH_MODE {
@@ -32,15 +33,51 @@ process PUBLISH_ALL {
 }
 
 process PARTIAL_PUBLISH {
-    publishDir params.publish_dir, mode: 'copy', pattern: 'published.txt'
+    publishDir params.publish_dir, mode: 'copy', pattern: 'qc.log'
 
     output:
-    path '*.txt'
+    path 'sample.bam', emit: bam
+    path 'qc.log', emit: qc
 
     script:
     """
-    echo published > published.txt
-    echo private > private.txt
+    echo bam > sample.bam
+    echo qc > qc.log
+    """
+}
+
+process NFCORE_DEFAULT_PUBLISH {
+    publishDir params.publish_dir, mode: 'link', saveAs: { filename ->
+        filename == 'versions.yml' ? null : filename
+    }
+
+    output:
+    path 'result.txt', emit: result
+    path 'versions.yml', emit: versions
+
+    script:
+    """
+    echo result > result.txt
+    echo version > versions.yml
+    """
+}
+
+process NFCORE_STAR_PUBLISH {
+    publishDir params.publish_dir, mode: 'link', pattern: '*.{out,tab}'
+    publishDir params.publish_dir, mode: 'link', pattern: '*.bam', saveAs: { filename ->
+        params.save_align_intermeds ? filename : null
+    }
+
+    output:
+    path 'sample.bam', emit: bam
+    path 'Log.final.out', emit: log
+    path 'SJ.out.tab', emit: junctions
+
+    script:
+    """
+    echo bam > sample.bam
+    echo final > Log.final.out
+    echo junctions > SJ.out.tab
     """
 }
 
@@ -128,7 +165,15 @@ workflow {
     }
     else if( params.scenario == 'partial_publish' ) {
         PARTIAL_PUBLISH()
-        CONSUME_MANY(PARTIAL_PUBLISH.out)
+        CONSUME_ONE(PARTIAL_PUBLISH.out.bam)
+    }
+    else if( params.scenario == 'nfcore_default_saveas' ) {
+        NFCORE_DEFAULT_PUBLISH()
+        CONSUME_ONE(NFCORE_DEFAULT_PUBLISH.out.result)
+    }
+    else if( params.scenario == 'nfcore_star_saveas' ) {
+        NFCORE_STAR_PUBLISH()
+        CONSUME_ONE(NFCORE_STAR_PUBLISH.out.bam)
     }
     else if( params.scenario == 'multiple_publish' ) {
         MULTIPLE_PUBLISH()

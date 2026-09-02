@@ -136,6 +136,8 @@ class GcObserver implements TraceObserverV2 {
 
     @Override
     void onFilePublish(FilePublishEvent event) {
+        if( artifactRegistry != null && event != null )
+            artifactRegistry.onFilePublish(event.source)
         record('FILE_PUBLISH')
         log.debug "nf-gc file published: ${event}"
     }

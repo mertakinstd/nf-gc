@@ -177,4 +177,132 @@ nextflow_pipeline {
             assert !events.any { it.startsWith('ARTIFACT_MISSING\tOPTIONAL_SOURCE\t') }
         }
     }
+
+    test("reclaims only declared outputs from a task with undeclared side files") {
+        when {
+            params {
+                scenario = 'multi_output_side_files'
+            }
+        }
+        then {
+            assert workflow.success
+            def events = path("$launchDir/nf-gc-events.tsv").readLines()
+            def tracked = events.findAll { it.startsWith('ARTIFACT_TRACKED\tMULTI_OUTPUT_SOURCE\t') }
+            def deleted = events.findAll { it.startsWith('ARTIFACT_DELETED\tMULTI_OUTPUT_SOURCE\t') }
+            assert tracked.size() == 2
+            assert deleted.size() == 2
+            assert (deleted.collect { path(it.split('\t', 3)[2]).fileName.toString() } as Set) == (['sample.bam', 'sample.bai'] as Set)
+
+            def workDir = path(deleted.first().split('\t', 3)[2]).parent
+            assert java.nio.file.Files.exists(workDir.resolve('align.log'))
+            assert java.nio.file.Files.exists(workDir.resolve('scratch.tmp'))
+            assert java.nio.file.Files.exists(workDir.resolve('.command.sh'))
+            assert java.nio.file.Files.exists(workDir.resolve('.command.run'))
+            assert !events.any { it.startsWith('ARTIFACT_TRACKED\tMULTI_OUTPUT_SOURCE\t') && (it.endsWith('/align.log') || it.endsWith('/scratch.tmp')) }
+        }
+    }
+
+    test("reclaims a log when the log is a declared process output") {
+        when {
+            params {
+                scenario = 'declared_log_output'
+            }
+        }
+        then {
+            assert workflow.success
+            def events = path("$launchDir/nf-gc-events.tsv").readLines()
+            def tracked = events.findAll { it.startsWith('ARTIFACT_TRACKED\tDECLARED_LOG_SOURCE\t') }
+            def deleted = events.findAll { it.startsWith('ARTIFACT_DELETED\tDECLARED_LOG_SOURCE\t') }
+            assert tracked.size() == 2
+            assert deleted.size() == 2
+            assert (deleted.collect { path(it.split('\t', 3)[2]).fileName.toString() } as Set) == (['sample.bam', 'align.log'] as Set)
+            deleted.each { event ->
+                assert !java.nio.file.Files.exists(path(event.split('\t', 3)[2]), java.nio.file.LinkOption.NOFOLLOW_LINKS)
+            }
+        }
+    }
+
+    test("tracks all realized glob outputs without acquiring an undeclared side file") {
+        when {
+            params {
+                scenario = 'glob_with_side_file'
+            }
+        }
+        then {
+            assert workflow.success
+            def events = path("$launchDir/nf-gc-events.tsv").readLines()
+            def tracked = events.findAll { it.startsWith('ARTIFACT_TRACKED\tGLOB_WITH_SIDE_SOURCE\t') }
+            def deleted = events.findAll { it.startsWith('ARTIFACT_DELETED\tGLOB_WITH_SIDE_SOURCE\t') }
+            assert tracked.size() == 3
+            assert deleted.size() == 3
+            assert (deleted.collect { path(it.split('\t', 3)[2]).fileName.toString() } as Set) == (['one.bam', 'two.bam', 'three.bam'] as Set)
+
+            def workDir = path(deleted.first().split('\t', 3)[2]).parent
+            assert java.nio.file.Files.exists(workDir.resolve('tool.log'))
+            assert !events.any { it.startsWith('ARTIFACT_TRACKED\tGLOB_WITH_SIDE_SOURCE\t') && it.endsWith('/tool.log') }
+        }
+    }
+
+    test("tracks only path members of a tuple output") {
+        when {
+            params {
+                scenario = 'tuple_outputs'
+            }
+        }
+        then {
+            assert workflow.success
+            def events = path("$launchDir/nf-gc-events.tsv").readLines()
+            def tracked = events.findAll { it.startsWith('ARTIFACT_TRACKED\tTUPLE_SOURCE\t') }
+            def deleted = events.findAll { it.startsWith('ARTIFACT_DELETED\tTUPLE_SOURCE\t') }
+            assert tracked.size() == 2
+            assert deleted.size() == 2
+            assert (deleted.collect { path(it.split('\t', 3)[2]).fileName.toString() } as Set) == (['sample1.bam', 'sample1.bai'] as Set)
+        }
+    }
+
+    test("reclaims a declared directory without cleaning unrelated task files") {
+        when {
+            params {
+                scenario = 'directory_output'
+            }
+        }
+        then {
+            assert workflow.success
+            def events = path("$launchDir/nf-gc-events.tsv").readLines()
+            def tracked = events.findAll { it.startsWith('ARTIFACT_TRACKED\tDIRECTORY_OUTPUT_SOURCE\t') }
+            def deleted = events.findAll { it.startsWith('ARTIFACT_DELETED\tDIRECTORY_OUTPUT_SOURCE\t') }
+            assert tracked.size() == 1
+            assert deleted.size() == 1
+
+            def directory = path(deleted.first().split('\t', 3)[2])
+            def workDir = directory.parent
+            assert directory.fileName.toString() == 'index'
+            assert !java.nio.file.Files.exists(directory, java.nio.file.LinkOption.NOFOLLOW_LINKS)
+            assert java.nio.file.Files.exists(workDir.resolve('tool.log'))
+            assert java.nio.file.Files.exists(workDir.resolve('.command.sh'))
+            assert java.nio.file.Files.exists(workDir.resolve('.command.run'))
+        }
+    }
+
+    test("keeps a staged external input while reclaiming multiple generated outputs") {
+        when {
+            params {
+                scenario = 'staged_multi_output'
+                external_path = "$launchDir/external/source.txt"
+            }
+        }
+        then {
+            assert workflow.success
+            def events = path("$launchDir/nf-gc-events.tsv").readLines()
+            def tracked = events.findAll { it.startsWith('ARTIFACT_TRACKED\tSTAGED_MULTI_SOURCE\t') }
+            def deleted = events.findAll { it.startsWith('ARTIFACT_DELETED\tSTAGED_MULTI_SOURCE\t') }
+            assert path(params.external_path).exists()
+            assert path(params.external_path).text == 'external-data\n'
+            assert tracked.size() == 2
+            assert deleted.size() == 2
+            assert (deleted.collect { path(it.split('\t', 3)[2]).fileName.toString() } as Set) == (['sample.bam', 'sample.bai'] as Set)
+            assert !events.any { it.startsWith('ARTIFACT_DELETED\tSTAGED_MULTI_SOURCE\t') && it.endsWith('/source.txt') }
+        }
+    }
+
 }

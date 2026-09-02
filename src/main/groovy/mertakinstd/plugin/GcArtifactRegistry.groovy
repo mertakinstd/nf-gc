@@ -20,6 +20,7 @@ import java.nio.file.FileVisitResult
 import java.nio.file.Files
 import java.nio.file.LinkOption
 import java.nio.file.Path
+import java.nio.file.PathMatcher
 import java.nio.file.SimpleFileVisitor
 import java.nio.file.attribute.BasicFileAttributes
 import java.util.ArrayList
@@ -36,6 +37,8 @@ import java.util.Set
 import groovy.transform.CompileStatic
 import groovy.util.logging.Slf4j
 import nextflow.Session
+import nextflow.file.FileHelper
+import nextflow.processor.PublishDir
 import nextflow.processor.TaskProcessor
 import nextflow.processor.TaskRun
 import nextflow.script.params.FileOutParam
@@ -47,7 +50,7 @@ import nextflow.script.params.FileOutParam
  * The policy is deliberately conservative:
  *   - only successful, non-cached Nextflow task outputs are considered;
  *   - only artifacts owned by the task work directory are considered;
- *   - process publishDir, workflow outputs, terminal outputs, storeDir and
+ *   - published artifacts, workflow outputs, terminal outputs, storeDir and
  *     unknown cases are kept;
  *   - staged inputs never acquire ownership by being re-emitted.
  *
@@ -116,6 +119,7 @@ final class GcArtifactRegistry {
 
     private final Map<TaskProcessor, Set<Path>> tracked = new IdentityHashMap<>()
     private final Map<Path, TaskProcessor> ownerByArtifact = new LinkedHashMap<>()
+    private final Set<Path> publishedSources = new LinkedHashSet<>()
 
     private final Map<Path, Set<TaskRun>> taskHoldsByArtifact = new LinkedHashMap<>()
     private final Map<TaskRun, Set<Path>> heldArtifactsByTask = new IdentityHashMap<>()
@@ -132,6 +136,12 @@ final class GcArtifactRegistry {
             throw new IllegalArgumentException('Process graph must not be null')
         this.graph = graph
         this.session = session
+    }
+
+    synchronized void onFilePublish(Path source) {
+        final Path path = normalize(source, null)
+        if( path != null )
+            publishedSources.add(path)
     }
 
     /**
@@ -245,7 +255,14 @@ final class GcArtifactRegistry {
         if( hasWorkflowOutputs() )
             return update(process, Collections.<Path>emptyList(), newlyHeld, releasedInputDeletions, KEEP_WORKFLOW_OUTPUT)
 
-        if( hasPublishDir(task) )
+        final Set<Path> publishedOutputs = publicationProtectedOutputs(task, ownedOutputs)
+        final List<Path> collectibleOutputs = new ArrayList<>()
+        for( Path artifact : ownedOutputs ) {
+            if( !publishedOutputs.contains(artifact) )
+                collectibleOutputs.add(artifact)
+        }
+
+        if( !ownedOutputs.isEmpty() && collectibleOutputs.isEmpty() )
             return update(process, Collections.<Path>emptyList(), newlyHeld, releasedInputDeletions, KEEP_PUBLISH_DIR)
 
         if( graph.consumersOf(process).isEmpty() )
@@ -262,7 +279,7 @@ final class GcArtifactRegistry {
         }
 
         final List<Path> newlyTracked = new ArrayList<>()
-        for( Path artifact : ownedOutputs ) {
+        for( Path artifact : collectibleOutputs ) {
             if( processArtifacts.add(artifact) ) {
                 ownerByArtifact.put(artifact, process)
                 newlyTracked.add(artifact)
@@ -305,14 +322,82 @@ final class GcArtifactRegistry {
         }
     }
 
-    private boolean hasPublishDir(TaskRun task) {
+    private Set<Path> publicationProtectedOutputs(TaskRun task, Collection<Path> artifacts) {
+        if( artifacts == null || artifacts.isEmpty() )
+            return Collections.emptySet()
+
+        final List<PublishDir> directives
         try {
-            return !!task.config?.getPublishDir()
+            directives = task.config != null ? task.config.getPublishDir() : null
         }
         catch( Throwable e ) {
             log.warn "nf-gc could not resolve publishDir for task ${task.name}; keeping outputs", e
-            return true
+            return new LinkedHashSet<Path>(artifacts)
         }
+
+        if( directives == null || directives.isEmpty() )
+            return Collections.emptySet()
+
+        final Path sourceDir = normalize(task.targetDir, null)
+        if( sourceDir == null )
+            return new LinkedHashSet<Path>(artifacts)
+
+        final Set<Path> result = new LinkedHashSet<>()
+        try {
+            for( PublishDir directive : directives ) {
+                if( directive == null || !directive.isEnabled() ) {
+                    result.addAll(artifacts)
+                    continue
+                }
+
+                final String pattern = directive.getPattern()
+                final PathMatcher matcher = pattern != null && !pattern.isEmpty()
+                    ? FileHelper.getPathMatcherFor('glob:' + pattern, sourceDir.getFileSystem())
+                    : null
+                final boolean hasSaveAs = directive.getSaveAs() != null
+                final boolean publicationObservedInline = hasSaveAs && publishesInline(directive)
+
+                for( Path artifact : artifacts ) {
+                    final Path relative = sourceDir.relativize(artifact)
+                    if( matcher != null && !matcher.matches(relative) )
+                        continue
+
+                    if( !hasSaveAs ) {
+                        result.add(artifact)
+                        continue
+                    }
+
+                    /*
+                     * Re-running saveAs would execute user code twice and can
+                     * diverge from Nextflow for stateful closures. Link-family
+                     * publication is synchronous, so the real FilePublishEvent
+                     * is already available at task completion and is the exact
+                     * publication decision. Async modes remain conservative.
+                     */
+                    if( publicationObservedInline ) {
+                        if( publishedSources.contains(artifact) )
+                            result.add(artifact)
+                    }
+                    else {
+                        result.add(artifact)
+                    }
+                }
+            }
+        }
+        catch( Throwable e ) {
+            log.warn "nf-gc could not classify publishDir artifacts for task ${task.name}; keeping outputs", e
+            return new LinkedHashSet<Path>(artifacts)
+        }
+        finally {
+            publishedSources.removeAll(artifacts)
+        }
+
+        return result
+    }
+
+    private static boolean publishesInline(PublishDir directive) {
+        final PublishDir.Mode mode = directive.getMode()
+        return mode == PublishDir.Mode.LINK || mode == PublishDir.Mode.SYMLINK || mode == PublishDir.Mode.RELLINK
     }
 
     private static Set<Path> outputPaths(TaskRun task) {

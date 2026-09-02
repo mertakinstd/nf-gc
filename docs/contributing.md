@@ -31,21 +31,19 @@ Docker is optional. It is not required for the core Gradle, synthetic Nextflow, 
 Run the core checks from the repository root:
 
 ```bash
-./gradlew clean test
-./gradlew installPlugin
-nf-test test tests --verbose
+./test.sh
 ```
 
-See [testing.md](testing.md) for the current test layout and expectations.
+See [the test specification](../tests/testing.md) for the regression model and acceptance criteria.
 
 ## Repository layout
 
 ```text
 src/main/groovy/   Plugin implementation
 src/test/groovy/   Gradle/Spock tests
-tests/             Synthetic Nextflow workflows and nf-test tests
+tests/             Synthetic workflows, nf-test cases, and test specification
 scripts/           Repository development utilities
-docs/              Contributor and testing documentation
+docs/              Contributor and issue documentation
 ```
 
 `.tools/`, `.nxf/`, and `.nf-test/` are local development state and must not be committed.
@@ -78,9 +76,7 @@ Do not replace pinned versions with `latest` URLs.
 
 Verify at minimum:
 
-- `./gradlew clean test` passes.
-- `./gradlew installPlugin` succeeds.
-- `nf-test test tests --verbose` passes.
+- `./test.sh` passes.
 - Behavior changes have appropriate test coverage.
 - Relevant documentation is updated.
 - No generated build output, tool downloads, Nextflow state, credentials, or private data are included.

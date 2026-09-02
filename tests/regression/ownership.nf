@@ -189,8 +189,143 @@ process READ_OPTIONAL_MAIN {
     """
 }
 
+process MULTI_OUTPUT_SOURCE {
+    output:
+    path 'sample.bam', emit: bam
+    path 'sample.bai', emit: bai
+
+    script:
+    """
+    echo bam > sample.bam
+    echo bai > sample.bai
+    echo tool-log > align.log
+    echo scratch > scratch.tmp
+    """
+}
+
+process DECLARED_LOG_SOURCE {
+    output:
+    path 'sample.bam', emit: bam
+    path 'align.log', emit: log
+
+    script:
+    """
+    echo bam > sample.bam
+    echo tool-log > align.log
+    """
+}
+
+process READ_PAIR {
+    input:
+    path bam
+    path bai
+
+    output:
+    path 'done.txt'
+
+    script:
+    """
+    cat "$bam" "$bai" > done.txt
+    """
+}
+
+process GLOB_WITH_SIDE_SOURCE {
+    output:
+    path '*.bam'
+
+    script:
+    """
+    echo one > one.bam
+    echo two > two.bam
+    echo three > three.bam
+    echo tool-log > tool.log
+    """
+}
+
+process READ_BAM_GLOB {
+    input:
+    path files
+
+    output:
+    path 'done.txt'
+
+    script:
+    """
+    cat *.bam > done.txt
+    """
+}
+
+process TUPLE_SOURCE {
+    input:
+    val sample
+
+    output:
+    tuple val(sample), path("${sample}.bam"), path("${sample}.bai")
+
+    script:
+    """
+    echo bam > ${sample}.bam
+    echo bai > ${sample}.bai
+    """
+}
+
+process READ_TUPLE {
+    input:
+    tuple val(sample), path(bam), path(bai)
+
+    output:
+    path 'done.txt'
+
+    script:
+    """
+    cat "$bam" "$bai" > done.txt
+    """
+}
+
+process DIRECTORY_OUTPUT_SOURCE {
+    output:
+    path 'index'
+
+    script:
+    """
+    mkdir -p index/nested
+    echo index > index/data.bin
+    echo nested > index/nested/data.bin
+    echo tool-log > tool.log
+    """
+}
+
+process READ_INDEX {
+    input:
+    path index
+
+    output:
+    path 'done.txt'
+
+    script:
+    """
+    cat "$index/data.bin" "$index/nested/data.bin" > done.txt
+    """
+}
+
+process STAGED_MULTI_SOURCE {
+    input:
+    path reads
+
+    output:
+    path 'sample.bam', emit: bam
+    path 'sample.bai', emit: bai
+
+    script:
+    """
+    cat "$reads" > sample.bam
+    echo index > sample.bai
+    echo tool-log > tool.log
+    """
+}
+
 workflow {
-    if( params.scenario in ['external_default', 'external_stage_copy', 'external_reemit'] ) {
+    if( params.scenario in ['external_default', 'external_stage_copy', 'external_reemit', 'staged_multi_output'] ) {
         external = file(params.external_path)
         java.nio.file.Files.createDirectories(external.parent)
         java.nio.file.Files.writeString(external, 'external-data\n')
@@ -239,5 +374,29 @@ workflow {
     else if( params.scenario == 'optional_absent' ) {
         OPTIONAL_SOURCE()
         READ_OPTIONAL_MAIN(OPTIONAL_SOURCE.out.main)
+    }
+    else if( params.scenario == 'multi_output_side_files' ) {
+        MULTI_OUTPUT_SOURCE()
+        READ_PAIR(MULTI_OUTPUT_SOURCE.out.bam, MULTI_OUTPUT_SOURCE.out.bai)
+    }
+    else if( params.scenario == 'declared_log_output' ) {
+        DECLARED_LOG_SOURCE()
+        READ_PAIR(DECLARED_LOG_SOURCE.out.bam, DECLARED_LOG_SOURCE.out.log)
+    }
+    else if( params.scenario == 'glob_with_side_file' ) {
+        GLOB_WITH_SIDE_SOURCE()
+        READ_BAM_GLOB(GLOB_WITH_SIDE_SOURCE.out)
+    }
+    else if( params.scenario == 'tuple_outputs' ) {
+        TUPLE_SOURCE(Channel.of('sample1'))
+        READ_TUPLE(TUPLE_SOURCE.out)
+    }
+    else if( params.scenario == 'directory_output' ) {
+        DIRECTORY_OUTPUT_SOURCE()
+        READ_INDEX(DIRECTORY_OUTPUT_SOURCE.out)
+    }
+    else if( params.scenario == 'staged_multi_output' ) {
+        STAGED_MULTI_SOURCE(external)
+        READ_PAIR(STAGED_MULTI_SOURCE.out.bam, STAGED_MULTI_SOURCE.out.bai)
     }
 }

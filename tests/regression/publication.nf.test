@@ -4,7 +4,7 @@ nextflow_pipeline {
     script "tests/regression/publication.nf"
 
 
-    test("keeps copy publish mode under the binary publication policy") {
+    test("preserves an artifact published with copy mode") {
         when {
             params {
                 scenario = 'publish_mode'
@@ -24,7 +24,7 @@ nextflow_pipeline {
         }
     }
 
-    test("keeps copyNoFollow publish mode under the binary publication policy") {
+    test("preserves an artifact published with copyNoFollow mode") {
         when {
             params {
                 scenario = 'publish_mode'
@@ -44,7 +44,7 @@ nextflow_pipeline {
         }
     }
 
-    test("keeps hard-link publish mode under the binary publication policy") {
+    test("preserves an artifact published with hard-link mode") {
         when {
             params {
                 scenario = 'publish_mode'
@@ -64,7 +64,7 @@ nextflow_pipeline {
         }
     }
 
-    test("keeps absolute-symlink publish mode under the binary publication policy") {
+    test("preserves an artifact published with absolute-symlink mode") {
         when {
             params {
                 scenario = 'publish_mode'
@@ -84,7 +84,7 @@ nextflow_pipeline {
         }
     }
 
-    test("keeps relative-symlink publish mode under the binary publication policy") {
+    test("preserves an artifact published with relative-symlink mode") {
         when {
             params {
                 scenario = 'publish_mode'
@@ -104,7 +104,7 @@ nextflow_pipeline {
         }
     }
 
-    test("does not reclaim move publish mode under the binary publication policy") {
+    test("does not acquire an artifact published with move mode") {
         when {
             params {
                 scenario = 'publish_mode'
@@ -124,7 +124,7 @@ nextflow_pipeline {
         }
     }
 
-    test("keeps every artifact from a process with publishDir") {
+    test("preserves an output selected by publishDir while it is consumed downstream") {
         when {
             params {
                 scenario = 'publish_all'
@@ -141,7 +141,7 @@ nextflow_pipeline {
         }
     }
 
-    test("keeps the whole task when publishDir selects only one output") {
+    test("reclaims an unpublished output while preserving a published sibling") {
         when {
             params {
                 scenario = 'partial_publish'
@@ -151,22 +151,162 @@ nextflow_pipeline {
         then {
             assert workflow.success
             def events = path("$launchDir/nf-gc-events.tsv").readLines()
-            assert events.contains('ARTIFACT_KEEP\tPARTIAL_PUBLISH\tPUBLISH_DIR')
-            assert !events.any { it.startsWith('ARTIFACT_TRACKED\tPARTIAL_PUBLISH\t') }
-            assert path("$launchDir/published/published.txt").exists()
-            assert !path("$launchDir/published/private.txt").exists()
-            def privateFiles = []
+            assert events.any {
+                it.startsWith('ARTIFACT_TRACKED\tPARTIAL_PUBLISH\t') &&
+                it.endsWith('sample.bam')
+            }
+            assert events.any {
+                it.startsWith('ARTIFACT_DELETED\tPARTIAL_PUBLISH\t') &&
+                it.endsWith('sample.bam')
+            }
+            assert !events.any {
+                it.startsWith('ARTIFACT_DELETED\tPARTIAL_PUBLISH\t') &&
+                it.endsWith('qc.log')
+            }
+            assert path("$launchDir/published/qc.log").exists()
+            assert !path("$launchDir/published/sample.bam").exists()
+
+            def workBams = []
+            def workQcLogs = []
             java.nio.file.Files.walk(path(workDir)).withCloseable { stream ->
                 stream.filter {
-                    it.fileName.toString() == 'private.txt' &&
                     java.nio.file.Files.isRegularFile(it, java.nio.file.LinkOption.NOFOLLOW_LINKS)
-                }.forEach { privateFiles << it }
+                }.forEach {
+                    if( it.fileName.toString() == 'sample.bam' )
+                        workBams << it
+                    else if( it.fileName.toString() == 'qc.log' )
+                        workQcLogs << it
+                }
             }
-            assert privateFiles.size() == 1
+
+            assert workBams.isEmpty()
+            assert workQcLogs.size() == 1
         }
     }
 
-    test("keeps the whole task with multiple publishDir directives") {
+    test("reclaims a file rejected by an nf-core-style filename saveAs filter") {
+        when {
+            params {
+                scenario = 'nfcore_default_saveas'
+                publish_dir = "$launchDir/nfcore-default"
+            }
+        }
+        then {
+            assert workflow.success
+            def events = path("$launchDir/nf-gc-events.tsv").readLines()
+            assert events.any {
+                it.startsWith('ARTIFACT_TRACKED\tNFCORE_DEFAULT_PUBLISH\t') &&
+                it.endsWith('versions.yml')
+            }
+            assert events.any {
+                it.startsWith('ARTIFACT_DELETED\tNFCORE_DEFAULT_PUBLISH\t') &&
+                it.endsWith('versions.yml')
+            }
+            assert !events.any {
+                it.startsWith('ARTIFACT_DELETED\tNFCORE_DEFAULT_PUBLISH\t') &&
+                it.endsWith('result.txt')
+            }
+            assert path("$launchDir/nfcore-default/result.txt").exists()
+            assert !path("$launchDir/nfcore-default/versions.yml").exists()
+
+            def workResults = []
+            def workVersions = []
+            java.nio.file.Files.walk(path(workDir)).withCloseable { stream ->
+                stream.filter {
+                    java.nio.file.Files.isRegularFile(it, java.nio.file.LinkOption.NOFOLLOW_LINKS)
+                }.forEach {
+                    if( it.fileName.toString() == 'result.txt' )
+                        workResults << it
+                    else if( it.fileName.toString() == 'versions.yml' )
+                        workVersions << it
+                }
+            }
+            assert workResults.size() == 1
+            assert workVersions.isEmpty()
+        }
+    }
+
+    test("reclaims an nf-core-style gated BAM when save_align_intermeds is false") {
+        when {
+            params {
+                scenario = 'nfcore_star_saveas'
+                publish_dir = "$launchDir/nfcore-star-disabled"
+                save_align_intermeds = false
+            }
+        }
+        then {
+            assert workflow.success
+            def events = path("$launchDir/nf-gc-events.tsv").readLines()
+            assert events.any {
+                it.startsWith('ARTIFACT_TRACKED\tNFCORE_STAR_PUBLISH\t') &&
+                it.endsWith('sample.bam')
+            }
+            assert events.any {
+                it.startsWith('ARTIFACT_DELETED\tNFCORE_STAR_PUBLISH\t') &&
+                it.endsWith('sample.bam')
+            }
+            assert !events.any {
+                it.startsWith('ARTIFACT_DELETED\tNFCORE_STAR_PUBLISH\t') &&
+                (it.endsWith('Log.final.out') || it.endsWith('SJ.out.tab'))
+            }
+            assert path("$launchDir/nfcore-star-disabled/Log.final.out").exists()
+            assert path("$launchDir/nfcore-star-disabled/SJ.out.tab").exists()
+            assert !path("$launchDir/nfcore-star-disabled/sample.bam").exists()
+
+            def workBams = []
+            def workLogs = []
+            java.nio.file.Files.walk(path(workDir)).withCloseable { stream ->
+                stream.filter {
+                    java.nio.file.Files.isRegularFile(it, java.nio.file.LinkOption.NOFOLLOW_LINKS)
+                }.forEach {
+                    if( it.fileName.toString() == 'sample.bam' )
+                        workBams << it
+                    else if( it.fileName.toString() in ['Log.final.out', 'SJ.out.tab'] )
+                        workLogs << it
+                }
+            }
+            assert workBams.isEmpty()
+            assert workLogs.size() == 2
+        }
+    }
+
+    test("preserves an nf-core-style gated BAM when save_align_intermeds is true") {
+        when {
+            params {
+                scenario = 'nfcore_star_saveas'
+                publish_dir = "$launchDir/nfcore-star-enabled"
+                save_align_intermeds = true
+            }
+        }
+        then {
+            assert workflow.success
+            def events = path("$launchDir/nf-gc-events.tsv").readLines()
+            assert !events.any {
+                it.startsWith('ARTIFACT_TRACKED\tNFCORE_STAR_PUBLISH\t') &&
+                it.endsWith('sample.bam')
+            }
+            assert !events.any {
+                it.startsWith('ARTIFACT_DELETED\tNFCORE_STAR_PUBLISH\t') &&
+                it.endsWith('sample.bam')
+            }
+            assert path("$launchDir/nfcore-star-enabled/sample.bam").exists()
+            assert path("$launchDir/nfcore-star-enabled/Log.final.out").exists()
+            assert path("$launchDir/nfcore-star-enabled/SJ.out.tab").exists()
+
+            def workBams = []
+            java.nio.file.Files.walk(path(workDir)).withCloseable { stream ->
+                stream.filter {
+                    java.nio.file.Files.isRegularFile(it, java.nio.file.LinkOption.NOFOLLOW_LINKS)
+                }.forEach {
+                    if( it.fileName.toString() == 'sample.bam' )
+                        workBams << it
+                }
+            }
+            assert workBams.size() == 1
+        }
+    }
+
+    test("preserves outputs selected by multiple publishDir directives") {
         when {
             params {
                 scenario = 'multiple_publish'
