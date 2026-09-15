@@ -41,11 +41,19 @@ import nextflow.trace.event.WorkflowOutputEvent
 @CompileStatic
 class GcObserver implements TraceObserverV2 {
 
+    private final GcMode gcMode
     private Path traceFile
     private Session session
     private GcProcessGraph processGraph
     private GcDependencyState dependencyState
+    private GcOutputDependencyState outputDependencyState
     private GcArtifactRegistry artifactRegistry
+
+    GcObserver(GcMode gcMode) {
+        if( gcMode == null )
+            throw new IllegalArgumentException('nf-gc gc_mode must not be null')
+        this.gcMode = gcMode
+    }
 
     @Override
     void onFlowCreate(Session session) {
@@ -53,7 +61,8 @@ class GcObserver implements TraceObserverV2 {
         configureTestTrace(session)
         initializeTrace()
         record('FLOW_CREATE')
-        log.debug 'nf-gc flow created'
+        record('GC_MODE', gcMode.configValue)
+        log.debug "nf-gc flow created with gc_mode=${gcMode.configValue}"
     }
 
     @Override
@@ -65,9 +74,12 @@ class GcObserver implements TraceObserverV2 {
 
         this.processGraph = GcProcessGraph.from(session.dag)
         this.dependencyState = new GcDependencyState(processGraph)
-        this.artifactRegistry = new GcArtifactRegistry(processGraph, session)
+        this.outputDependencyState = gcMode == GcMode.ARTIFACT
+            ? new GcOutputDependencyState(processGraph, dependencyState)
+            : null
+        this.artifactRegistry = new GcArtifactRegistry(processGraph, session, gcMode)
         recordGraph(processGraph)
-        log.debug "nf-gc flow begun with ${processGraph.processes.size()} processes"
+        log.debug "nf-gc flow begun with ${processGraph.processes.size()} processes using gc_mode=${gcMode.configValue}"
     }
 
     @Override
@@ -89,6 +101,11 @@ class GcObserver implements TraceObserverV2 {
         for( TaskProcessor closed : dependencyState.onProcessTerminate(process) ) {
             record('DEPENDENCY_CLOSED', closed.name)
             recordDeletions(artifactRegistry.onDependencyClosed(closed))
+        }
+
+        if( outputDependencyState != null ) {
+            for( GcProcessGraph.OutputPort port : outputDependencyState.onProcessTerminate(process) )
+                recordDeletions(artifactRegistry.onOutputClosed(port))
         }
 
         log.debug "nf-gc process terminated: ${process.name}"

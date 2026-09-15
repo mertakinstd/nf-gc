@@ -41,11 +41,15 @@ import nextflow.file.FileHelper
 import nextflow.processor.PublishDir
 import nextflow.processor.TaskProcessor
 import nextflow.processor.TaskRun
+import nextflow.script.ProcessConfigV1
 import nextflow.script.params.FileOutParam
+import nextflow.script.params.OutParam
+import nextflow.script.params.TupleOutParam
 
 /**
- * Tracks Nextflow-owned task outputs that can be reclaimed once their producer
- * process becomes dependency-closed.
+ * Tracks Nextflow-owned task outputs and reclaims them when the configured GC
+ * lifecycle is closed: producer-process closure in process mode, or producer
+ * output-port closure in artifact mode.
  *
  * The policy is deliberately conservative:
  *   - only successful, non-cached Nextflow task outputs are considered;
@@ -116,9 +120,11 @@ final class GcArtifactRegistry {
 
     private final GcProcessGraph graph
     private final Session session
+    private final GcMode gcMode
 
     private final Map<TaskProcessor, Set<Path>> tracked = new IdentityHashMap<>()
     private final Map<Path, TaskProcessor> ownerByArtifact = new LinkedHashMap<>()
+    private final Map<Path, Set<GcProcessGraph.OutputPort>> portsByArtifact = new LinkedHashMap<>()
     private final Set<Path> publishedSources = new LinkedHashSet<>()
 
     private final Map<Path, Set<TaskRun>> taskHoldsByArtifact = new LinkedHashMap<>()
@@ -128,14 +134,18 @@ final class GcArtifactRegistry {
     private final Map<TaskProcessor, Set<Path>> heldArtifactsByProcess = new IdentityHashMap<>()
 
     private final Set<TaskProcessor> dependencyClosed = newIdentityProcessSet()
+    private final Set<GcProcessGraph.OutputPort> outputPortsClosed = new LinkedHashSet<>()
     private final Set<TaskRun> startedTasks = newIdentityTaskSet()
     private final Set<TaskRun> completedTasks = newIdentityTaskSet()
 
-    GcArtifactRegistry(GcProcessGraph graph, Session session=null) {
+    GcArtifactRegistry(GcProcessGraph graph, Session session=null, GcMode gcMode=GcMode.PROCESS) {
         if( graph == null )
             throw new IllegalArgumentException('Process graph must not be null')
+        if( gcMode == null )
+            throw new IllegalArgumentException('GC mode must not be null')
         this.graph = graph
         this.session = session
+        this.gcMode = gcMode
     }
 
     synchronized void onFilePublish(Path source) {
@@ -265,12 +275,56 @@ final class GcArtifactRegistry {
         if( !ownedOutputs.isEmpty() && collectibleOutputs.isEmpty() )
             return update(process, Collections.<Path>emptyList(), newlyHeld, releasedInputDeletions, KEEP_PUBLISH_DIR)
 
-        if( graph.consumersOf(process).isEmpty() )
+        if( gcMode == GcMode.PROCESS && graph.consumersOf(process).isEmpty() )
             return update(process, Collections.<Path>emptyList(), newlyHeld, releasedInputDeletions, KEEP_TERMINAL)
 
         final Path targetDir = normalize(task.targetDir, null)
         if( targetDir == null || !targetDir.equals(workDir) )
             return update(process, Collections.<Path>emptyList(), newlyHeld, releasedInputDeletions, KEEP_TARGET_DIR)
+
+        final Map<Path, Set<GcProcessGraph.OutputPort>> artifactPorts
+        final List<Path> trackableOutputs = new ArrayList<>()
+        if( gcMode == GcMode.ARTIFACT ) {
+            try {
+                artifactPorts = outputPortsByPath(task, workDir)
+            }
+            catch( Throwable e ) {
+                log.warn "nf-gc could not resolve output-port provenance for task ${task.name}; keeping outputs", e
+                return update(process, Collections.<Path>emptyList(), newlyHeld, releasedInputDeletions, KEEP_UNKNOWN)
+            }
+
+            if( artifactPorts == null )
+                return update(process, Collections.<Path>emptyList(), newlyHeld, releasedInputDeletions, KEEP_UNKNOWN)
+
+            boolean hasUnknown = false
+            for( Path artifact : collectibleOutputs ) {
+                final Set<GcProcessGraph.OutputPort> ports = artifactPorts.get(artifact)
+                if( ports == null || ports.isEmpty() ) {
+                    hasUnknown = true
+                    break
+                }
+
+                boolean terminal = false
+                for( GcProcessGraph.OutputPort port : ports ) {
+                    if( graph.isTerminal(port) ) {
+                        terminal = true
+                        break
+                    }
+                }
+                if( !terminal )
+                    trackableOutputs.add(artifact)
+            }
+
+            if( hasUnknown )
+                return update(process, Collections.<Path>emptyList(), newlyHeld, releasedInputDeletions, KEEP_UNKNOWN)
+
+            if( !collectibleOutputs.isEmpty() && trackableOutputs.isEmpty() )
+                return update(process, Collections.<Path>emptyList(), newlyHeld, releasedInputDeletions, KEEP_TERMINAL)
+        }
+        else {
+            artifactPorts = Collections.emptyMap()
+            trackableOutputs.addAll(collectibleOutputs)
+        }
 
         Set<Path> processArtifacts = tracked.get(process)
         if( processArtifacts == null ) {
@@ -279,16 +333,17 @@ final class GcArtifactRegistry {
         }
 
         final List<Path> newlyTracked = new ArrayList<>()
-        for( Path artifact : collectibleOutputs ) {
+        for( Path artifact : trackableOutputs ) {
             if( processArtifacts.add(artifact) ) {
                 ownerByArtifact.put(artifact, process)
+                if( gcMode == GcMode.ARTIFACT )
+                    portsByArtifact.put(artifact, new LinkedHashSet<GcProcessGraph.OutputPort>(artifactPorts.get(artifact)))
                 newlyTracked.add(artifact)
             }
         }
 
         final List<DeletionResult> deletions = new ArrayList<>(releasedInputDeletions)
-        if( dependencyClosed.contains(process) )
-            deletions.addAll(deleteReady(process))
+        deletions.addAll(deleteReady(process))
 
         return update(process, newlyTracked, newlyHeld, deletions)
     }
@@ -305,11 +360,17 @@ final class GcArtifactRegistry {
         candidates.addAll(releaseProcessHolds(process))
 
         final List<DeletionResult> results = new ArrayList<>()
-        for( TaskProcessor candidate : candidates ) {
-            if( dependencyClosed.contains(candidate) )
-                results.addAll(deleteReady(candidate))
-        }
+        for( TaskProcessor candidate : candidates )
+            results.addAll(deleteReady(candidate))
         return Collections.unmodifiableList(results)
+    }
+
+    synchronized List<DeletionResult> onOutputClosed(GcProcessGraph.OutputPort port) {
+        if( port == null || gcMode != GcMode.ARTIFACT )
+            return Collections.emptyList()
+        if( !outputPortsClosed.add(port) )
+            return Collections.emptyList()
+        return Collections.unmodifiableList(deleteReady(port.producer))
     }
 
     private boolean hasWorkflowOutputs() {
@@ -400,6 +461,68 @@ final class GcArtifactRegistry {
         return mode == PublishDir.Mode.LINK || mode == PublishDir.Mode.SYMLINK || mode == PublishDir.Mode.RELLINK
     }
 
+    /**
+     * Resolve legacy task file outputs to the top-level process output channel
+     * that emitted them. Tuple file members inherit the tuple's single output
+     * channel. Typed outputs are kept conservatively until Nextflow exposes an
+     * equally exact declaration-to-path mapping for that model.
+     */
+    private Map<Path, Set<GcProcessGraph.OutputPort>> outputPortsByPath(TaskRun task, Path workDir) {
+        if( task.hasTypedInputsOutputs() )
+            return null
+        if( !(task.processor.config instanceof ProcessConfigV1) )
+            return null
+
+        final ProcessConfigV1 config = (ProcessConfigV1)task.processor.config
+        final Map<FileOutParam, GcProcessGraph.OutputPort> portsByParam = new IdentityHashMap<>()
+
+        for( OutParam output : config.getOutputs() ) {
+            final Object channel = output.getOutChannel()
+            if( channel == null )
+                continue
+
+            final GcProcessGraph.OutputPort port = graph.outputPort(task.processor, channel)
+            if( port == null )
+                return null
+
+            if( output instanceof FileOutParam ) {
+                portsByParam.put((FileOutParam)output, port)
+            }
+            else if( output instanceof TupleOutParam ) {
+                final TupleOutParam tuple = (TupleOutParam)output
+                for( Object inner : tuple.inner ) {
+                    if( inner instanceof FileOutParam )
+                        portsByParam.put((FileOutParam)inner, port)
+                }
+            }
+        }
+
+        final Map resolved = task.getOutputsByType(FileOutParam)
+        final Map<Path, Set<GcProcessGraph.OutputPort>> result = new LinkedHashMap<>()
+        for( Object rawEntry : resolved.entrySet() ) {
+            final Map.Entry entry = (Map.Entry)rawEntry
+            final FileOutParam param = (FileOutParam)entry.key
+            final GcProcessGraph.OutputPort port = portsByParam.get(param)
+            if( port == null )
+                return null
+
+            final List<Path> values = new ArrayList<>()
+            appendOutputPaths(entry.value, values)
+            for( Path raw : values ) {
+                final Path path = normalize(raw, workDir)
+                if( path == null )
+                    continue
+                Set<GcProcessGraph.OutputPort> ports = result.get(path)
+                if( ports == null ) {
+                    ports = new LinkedHashSet<GcProcessGraph.OutputPort>()
+                    result.put(path, ports)
+                }
+                ports.add(port)
+            }
+        }
+        return result
+    }
+
     private static Set<Path> outputPaths(TaskRun task) {
         final Set<Path> result = new LinkedHashSet<>()
 
@@ -410,24 +533,28 @@ final class GcArtifactRegistry {
         }
 
         final Map outputs = task.getOutputsByType(FileOutParam)
-        for( Object value : outputs.values() ) {
-            if( value instanceof Path ) {
-                result.add((Path)value)
-            }
-            else if( value instanceof Collection ) {
-                for( Object item : (Collection)value ) {
-                    if( item instanceof Path )
-                        result.add((Path)item)
-                    else if( item != null )
-                        throw new IllegalArgumentException("Unknown output file object [${item.class.name}]: ${item}")
-                }
-            }
-            else if( value != null ) {
-                throw new IllegalArgumentException("Unknown output file object [${value.class.name}]: ${value}")
+        final List<Path> values = new ArrayList<>()
+        for( Object value : outputs.values() )
+            appendOutputPaths(value, values)
+        result.addAll(values)
+        return result
+    }
+
+    private static void appendOutputPaths(Object value, Collection<Path> result) {
+        if( value instanceof Path ) {
+            result.add((Path)value)
+        }
+        else if( value instanceof Collection ) {
+            for( Object item : (Collection)value ) {
+                if( item instanceof Path )
+                    result.add((Path)item)
+                else if( item != null )
+                    throw new IllegalArgumentException("Unknown output file object [${item.class.name}]: ${item}")
             }
         }
-
-        return result
+        else if( value != null ) {
+            throw new IllegalArgumentException("Unknown output file object [${value.class.name}]: ${value}")
+        }
     }
 
     private static Map<Path,Path> stagedInputSources(TaskRun task, Path workDir) {
@@ -506,10 +633,8 @@ final class GcArtifactRegistry {
     private List<DeletionResult> releaseTaskHoldsAndDelete(TaskRun task) {
         final Set<TaskProcessor> owners = releaseTaskHolds(task)
         final List<DeletionResult> results = new ArrayList<>()
-        for( TaskProcessor owner : owners ) {
-            if( dependencyClosed.contains(owner) )
-                results.addAll(deleteReady(owner))
-        }
+        for( TaskProcessor owner : owners )
+            results.addAll(deleteReady(owner))
         return results
     }
 
@@ -563,6 +688,20 @@ final class GcArtifactRegistry {
         return processHolders != null && !processHolders.isEmpty()
     }
 
+    private boolean isLifecycleReady(TaskProcessor process, Path path) {
+        if( gcMode == GcMode.PROCESS )
+            return dependencyClosed.contains(process)
+
+        final Set<GcProcessGraph.OutputPort> ports = portsByArtifact.get(path)
+        if( ports == null || ports.isEmpty() )
+            return false
+        for( GcProcessGraph.OutputPort port : ports ) {
+            if( !outputPortsClosed.contains(port) )
+                return false
+        }
+        return true
+    }
+
     private List<DeletionResult> deleteReady(TaskProcessor process) {
         final Set<Path> paths = tracked.get(process)
         if( paths == null || paths.isEmpty() )
@@ -578,7 +717,7 @@ final class GcArtifactRegistry {
 
         final List<DeletionResult> results = new ArrayList<>()
         for( Path path : ordered ) {
-            if( isHeld(path) )
+            if( isHeld(path) || !isLifecycleReady(process, path) )
                 continue
 
             final DeletionResult result = deleteArtifact(process, path)
@@ -592,6 +731,7 @@ final class GcArtifactRegistry {
             if( result.status != DeleteStatus.FAILED ) {
                 paths.remove(path)
                 ownerByArtifact.remove(path)
+                portsByArtifact.remove(path)
             }
         }
 

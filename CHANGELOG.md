@@ -2,6 +2,16 @@
 
 All notable changes to `nf-gc` are documented in this file.
 
+## 0.2.0 - 2026-09-15
+
+### Added
+
+- Public `nfGc.gc_mode` policy selection with `process` as the backward-compatible default and `artifact` as the second accepted policy value.
+- A single workflow-start INFO log reporting the resolved GC mode and whether the default `process` policy was selected because no mode was configured.
+- Formal Nextflow `ConfigScope` registration for `nfGc.gc_mode`, eliminating unrecognized-option warnings while preserving runtime validation and defaults.
+- Output-port-aware `artifact` reclamation that closes each producer output port against only its own downstream consumer processes while retaining process-level safety within the port.
+- Deterministic output-port graph/closure tests plus functional coverage for independent sibling ports, same-port fan-out, and RNA-seq-like multi-output topology.
+
 ## 0.1.0 - 2026-09-02
 
 Initial public release.

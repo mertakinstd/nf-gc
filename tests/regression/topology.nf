@@ -44,6 +44,45 @@ process SLOW_CONSUMER {
     """
 }
 
+
+process SHARED_SOURCE {
+    output:
+    path 'shared.txt', emit: shared
+
+    script:
+    """
+    echo shared > shared.txt
+    """
+}
+
+process FAST_SHARED_CONSUMER {
+    input:
+    path source
+
+    output:
+    path 'shared.fast.done'
+
+    script:
+    """
+    sleep 1
+    cat "$source" > shared.fast.done
+    """
+}
+
+process SLOW_SHARED_CONSUMER {
+    input:
+    path source
+
+    output:
+    path 'shared.slow.done'
+
+    script:
+    """
+    sleep 3
+    cat "$source" > shared.slow.done
+    """
+}
+
 process INNER_SINK {
     input:
     path source
@@ -113,6 +152,11 @@ workflow {
         DUAL_SOURCE()
         FAST_CONSUMER(DUAL_SOURCE.out.fast)
         SLOW_CONSUMER(DUAL_SOURCE.out.slow)
+    }
+    else if( params.scenario == 'shared_port' ) {
+        SHARED_SOURCE()
+        FAST_SHARED_CONSUMER(SHARED_SOURCE.out.shared)
+        SLOW_SHARED_CONSUMER(SHARED_SOURCE.out.shared)
     }
     else if( params.scenario == 'scoped_aliases' ) {
         INNER(Channel.of('inner'))

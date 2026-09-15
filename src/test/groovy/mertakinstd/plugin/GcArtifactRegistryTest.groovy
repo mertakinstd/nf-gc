@@ -176,6 +176,27 @@ class GcArtifactRegistryTest extends Specification {
         !Files.exists(source)
     }
 
+
+    def 'artifact mode keeps typed outputs when exact output-port provenance is unavailable'() {
+        given:
+        def producer = process('PRODUCER')
+        def consumer = process('CONSUMER')
+        def graph = graph([[producer, consumer]])
+        def registry = new GcArtifactRegistry(graph, null, GcMode.ARTIFACT)
+        def workDir = Files.createDirectories(tempDir.resolve('typed-artifact'))
+        def artifact = Files.writeString(workDir.resolve('result.txt'), 'result')
+        def task = successfulTask(producer, workDir, [artifact] as Set<Path>)
+
+        when:
+        def update = registry.onTaskComplete(task)
+
+        then:
+        update.keepReason == GcArtifactRegistry.KEEP_UNKNOWN
+        update.tracked.empty
+        update.deletions.empty
+        Files.exists(artifact)
+    }
+
     def 'missing artifacts become a terminal missing result without crashing'() {
         given:
         def producer = process('PRODUCER')

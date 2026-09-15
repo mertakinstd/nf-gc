@@ -17,26 +17,27 @@
 package mertakinstd.plugin
 
 import groovy.transform.CompileStatic
-import groovy.util.logging.Slf4j
-import nextflow.Session
-import nextflow.trace.TraceObserverFactoryV2
-import nextflow.trace.TraceObserverV2
+import nextflow.config.spec.ConfigOption
+import nextflow.config.spec.ConfigScope
+import nextflow.config.spec.ScopeName
+import nextflow.script.dsl.Description
 
 /**
- * Creates the nf-gc workflow observer.
+ * Declares the public nf-gc configuration scope to Nextflow.
  */
-@Slf4j
+@ScopeName(GcConfig.CONFIG_SCOPE)
 @CompileStatic
-class GcObserverFactory implements TraceObserverFactoryV2 {
+final class GcConfigScope implements ConfigScope {
 
-    @Override
-    Collection<TraceObserverV2> create(Session session) {
-        final GcConfig config = GcConfig.from(session)
-        if( config.modeExplicit )
-            log.info "nf-gc using gc_mode='${config.mode.configValue}'"
-        else
-            log.info "nf-gc gc_mode not configured; using default '${config.mode.configValue}'"
+    @ConfigOption
+    @Description('Garbage-collection dependency policy: process or artifact')
+    String gc_mode = GcMode.PROCESS.configValue
 
-        return List.<TraceObserverV2>of(new GcObserver(config.mode))
+    GcConfigScope() {}
+
+    GcConfigScope(Map options) {
+        final Object value = options?.get(GcConfig.MODE_KEY)
+        if( value != null )
+            this.gc_mode = value.toString()
     }
 }

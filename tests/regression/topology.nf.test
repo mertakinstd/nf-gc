@@ -12,6 +12,7 @@ nextflow_pipeline {
         then {
             assert workflow.success
             def events = path("$launchDir/nf-gc-events.tsv").readLines()
+            assert events.count { it == 'GC_MODE\tprocess' } == 1
             assert events.count { it.startsWith('ARTIFACT_TRACKED\tDUAL_SOURCE\t') } == 2
             def deletedArtifacts = events.findAll { it.startsWith('ARTIFACT_DELETED\tDUAL_SOURCE\t') }
             assert deletedArtifacts.size() == 2
@@ -30,6 +31,85 @@ nextflow_pipeline {
         }
     }
 
+    test("reclaims an independent output port before a slow sibling in artifact mode") {
+        config "tests/config/gc_mode_artifact.config"
+
+        when {
+            params {
+                scenario = 'dual_port'
+            }
+        }
+        then {
+            assert workflow.success
+            def events = path("$launchDir/nf-gc-events.tsv").readLines()
+            assert events.count { it == 'GC_MODE\tartifact' } == 1
+
+            def tracked = events.findAll { it.startsWith('ARTIFACT_TRACKED\tDUAL_SOURCE\t') }
+            assert tracked.size() == 2
+
+            def artifactPath = { fileName ->
+                def event = tracked.find { trackedEvent ->
+                    java.nio.file.Path.of(trackedEvent.split('\t', 3)[2]).fileName.toString() == fileName
+                }
+                assert event != null
+                event.split('\t', 3)[2]
+            }
+            def deletionIndex = { fileName ->
+                def target = artifactPath(fileName)
+                events.findIndexOf { it == "ARTIFACT_DELETED\tDUAL_SOURCE\t${target}" }
+            }
+
+            def fastTerminated = events.findIndexOf { it == 'PROCESS_TERMINATE\tFAST_CONSUMER' }
+            def slowTerminated = events.findIndexOf { it == 'PROCESS_TERMINATE\tSLOW_CONSUMER' }
+            def fastDeleted = deletionIndex('fast.txt')
+            def slowDeleted = deletionIndex('slow.txt')
+
+            assert fastTerminated >= 0
+            assert slowTerminated > fastTerminated
+            assert fastDeleted > fastTerminated
+            assert fastDeleted < slowTerminated
+            assert slowDeleted > slowTerminated
+
+            ['fast.txt', 'slow.txt'].each { fileName ->
+                assert !java.nio.file.Files.exists(
+                    path(artifactPath(fileName)),
+                    java.nio.file.LinkOption.NOFOLLOW_LINKS
+                )
+            }
+        }
+    }
+
+    test("keeps a shared output until every consumer terminates in artifact mode") {
+        config "tests/config/gc_mode_artifact.config"
+
+        when {
+            params {
+                scenario = 'shared_port'
+            }
+        }
+        then {
+            assert workflow.success
+            def events = path("$launchDir/nf-gc-events.tsv").readLines()
+            assert events.count { it == 'GC_MODE\tartifact' } == 1
+            assert events.count { it.startsWith('ARTIFACT_TRACKED\tSHARED_SOURCE\t') } == 1
+
+            def tracked = events.find { it.startsWith('ARTIFACT_TRACKED\tSHARED_SOURCE\t') }
+            assert tracked != null
+            def sharedPath = tracked.split('\t', 3)[2]
+            def deletion = "ARTIFACT_DELETED\tSHARED_SOURCE\t${sharedPath}"
+            assert events.count { it == deletion } == 1
+
+            def fastTerminated = events.findIndexOf { it == 'PROCESS_TERMINATE\tFAST_SHARED_CONSUMER' }
+            def slowTerminated = events.findIndexOf { it == 'PROCESS_TERMINATE\tSLOW_SHARED_CONSUMER' }
+            def sharedDeleted = events.findIndexOf { it == deletion }
+
+            assert fastTerminated >= 0
+            assert slowTerminated > fastTerminated
+            assert sharedDeleted > slowTerminated
+            assert !java.nio.file.Files.exists(path(sharedPath), java.nio.file.LinkOption.NOFOLLOW_LINKS)
+        }
+    }
+
     test("keeps aliased module instances distinct across nested workflow scope") {
         when {
             params {
@@ -39,6 +119,7 @@ nextflow_pipeline {
         then {
             assert workflow.success
             def events = path("$launchDir/nf-gc-events.tsv").readLines()
+            assert events.count { it == 'GC_MODE\tprocess' } == 1
             def created = events.findAll { it.startsWith('PROCESS_CREATE\t') }.collect { it.split('\t')[1] }
             assert created.contains('INNER:WORK_A')
             assert created.contains('INNER:INNER_SINK')
@@ -69,6 +150,7 @@ nextflow_pipeline {
             assert workflow.success
             assert workflow.trace.tasks().size() == 0
             def events = path("$launchDir/nf-gc-events.tsv").readLines()
+            assert events.count { it == 'GC_MODE\tprocess' } == 1
             assert events.contains('GRAPH_EDGE\tZERO_TASK\tZERO_SINK')
             assert events.count { it == 'DEPENDENCY_CLOSED\tZERO_TASK' } == 1
             assert events.count { it == 'DEPENDENCY_CLOSED\tZERO_SINK' } == 1

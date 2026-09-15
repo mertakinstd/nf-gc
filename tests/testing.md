@@ -12,11 +12,11 @@ When a new behavior is proposed, its functional case is written first. The exist
 
 1. Gradle/Spock tests for deterministic plugin contracts;
 2. plugin assembly and repo-local installation;
-3. all 43 nf-test functional cases against real Nextflow work directories and filesystem state.
+3. all 46 nf-test functional cases against real Nextflow work directories and filesystem state, including the `artifact`-mode output-port closure contract in F44-F46.
 
 Cases F41-F43 derive from nf-core/rnaseq 3.26.0 publication semantics and pin both null and non-null `saveAs` branches under hard-link publication.
 
-The functional cases below are the externally observable support matrix. Event traces establish lifecycle ordering and classification; filesystem assertions establish the actual retention or deletion result.
+The functional cases below are the externally observable support matrix. Event traces establish lifecycle ordering and classification; filesystem assertions establish the actual retention or deletion result. The shared test configuration selects `nfGc.gc_mode = 'process'` explicitly, and topology tests assert the resolved mode in the lifecycle trace so the current contract remains attached to a named GC policy as additional modes are introduced.
 
 ## Functional behavior contract
 
@@ -30,8 +30,8 @@ The functional cases below are the externally observable support matrix. Event t
 
 | ID | Supported situation | Expected nf-gc behavior | Evidence |
 | --- | --- | --- | --- |
-| F02 | A multi-sample RNA-seq-like graph combines a shared index, fan-out, two ALIGN output ports, joins, aggregation, publication, and an optional QC branch that is enabled. | The process graph matches the realized topology; each producer closes only after every immediate consumer terminates; internal index/read/BAM/count/quant/QC/merge artifacts are reclaimed after closure; `ALIGN_QC` is retained by `publishDir`; terminal `REPORT` is retained; published QC files survive. | `handles shared index, fan-out, join and aggregation` |
-| F03 | The same RNA-seq-like workflow runs with the optional `EXTRA_QC` branch disabled. | The unrealized branch creates no process, edge, closure, or artifact state; the remaining graph closes and reclaims normally, while publication and terminal retention remain unchanged. | `handles an optional branch that is not instantiated` |
+| F02 | A multi-sample RNA-seq-like graph combines a shared index, fan-out, two ALIGN output ports, joins, aggregation, publication, and an optional QC branch that is enabled. | Under `gc_mode = process`, the process graph matches the realized topology; each producer closes only after every immediate consumer terminates; internal index/read/BAM/count/quant/QC/merge artifacts are reclaimed after closure; `ALIGN_QC` is retained by `publishDir`; terminal `REPORT` is retained; published QC files survive. | `handles shared index, fan-out, join and aggregation` |
+| F03 | The same RNA-seq-like workflow runs with the optional `EXTRA_QC` branch disabled. | Under `gc_mode = process`, the unrealized branch creates no process, edge, closure, or artifact state; the remaining graph closes and reclaims normally, while publication and terminal retention remain unchanged. | `handles an optional branch that is not instantiated` |
 
 ### Cached execution
 
@@ -92,9 +92,19 @@ Publication retention follows the artifact selected for publication. A `publishD
 
 | ID | Supported situation | Expected nf-gc behavior | Evidence |
 | --- | --- | --- | --- |
-| F37 | One process produces two output ports consumed by a fast and a slow downstream process. | Closure is process-level: neither source artifact is reclaimed when only the fast branch finishes; both are reclaimed only after all immediate consumers terminate and the producer closes. | `waits for the slow consumer before deleting either output port` |
+| F37 | One process produces two output ports consumed by a fast and a slow downstream process. | Under `gc_mode = process`, closure is process-level: neither source artifact is reclaimed when only the fast branch finishes; both are reclaimed only after all immediate consumers terminate and the producer closes. | `waits for the slow consumer before deleting either output port` |
 | F38 | The same module implementation is instantiated under different aliases/scopes in nested workflows. | Scoped process identities remain distinct; graph edges do not cross aliases, and each instance's artifact is reclaimed under its own dependency chain. | `keeps aliased module instances distinct across nested workflow scope` |
 | F39 | A process graph is instantiated over an empty channel and therefore runs zero tasks. | The process edge still exists; each process dependency closes exactly once; no artifact is invented, tracked, deleted, or reported as a deletion failure. | `closes a zero-task process graph without inventing artifacts` |
+
+### Artifact-mode topology contract
+
+These cases define the implemented `artifact` policy. The contract remains conservative: an artifact may be reclaimed only after its producer process and every downstream process reachable from that artifact's producer output port have terminated. Sibling output ports do not extend one another's lifetime, and the policy remains process-granular within each port rather than reclaiming individual task instances eagerly.
+
+| ID | Intended situation | Expected nf-gc behavior | Evidence |
+| --- | --- | --- | --- |
+| F44 | One producer emits independent `fast` and `slow` output ports to independent consumers. | Under `gc_mode = artifact`, `fast.txt` is reclaimed after `FAST_CONSUMER` terminates even while `SLOW_CONSUMER` and the producer's process-level dependency closure remain open; `slow.txt` remains until its own consumer terminates. | `reclaims an independent output port before a slow sibling in artifact mode` |
+| F45 | One producer emits a single artifact that fans out to both a fast and a slow consumer. | Artifact mode remains conservative within an output port: the shared artifact is retained after the fast consumer terminates and is reclaimed only after the slow consumer also terminates. | `keeps a shared output until every consumer terminates in artifact mode` |
+| F46 | The RNA-seq-like `ALIGN` process emits `genome_bam` to `SORT` plus `ALIGN_QC`, and `transcript_bam` independently to `QUANT`. | Each output port closes against its own consumer set: genome BAMs are reclaimable after both genome consumers terminate without waiting for `QUANT` or process-level `ALIGN` closure; transcript BAMs remain until `QUANT` terminates. Publication protection for `ALIGN_QC` outputs remains unchanged. | `reclaims ALIGN output ports by their own consumer sets in artifact mode` |
 
 ### Workflow outputs
 
@@ -116,9 +126,11 @@ These cases mirror publication idioms used by nf-core/rnaseq 3.26.0: pipeline-wi
 
 These are intentional descriptions of the current contract, not claims about the final design:
 
-- dependency closure and reclamation are process-level, not per-consumer-task or per-output-port;
+- `gc_mode = process` is the default policy; dependency closure and reclamation in this mode are producer-process scoped, not per-consumer-task or per-output-port;
+- `gc_mode = artifact` scopes liveness to the producer output port while still waiting for the producer process and every consumer process reachable from that port; it deliberately does not perform task-instance eager GC;
 - `publishDir` retention is artifact-level for pattern selection; link-family `saveAs` decisions use Nextflow's observed publication events, while async `saveAs` publication and disabled publication remain conservatively retained;
 - workflow-output presence is handled conservatively; artifact-level workflow-output provenance is not yet a GC decision surface;
+- artifact-mode output-port provenance is exact for legacy file outputs, including tuple file members; typed/V2 outputs without exact provenance resolve to `UNKNOWN` and are retained;
 - only realized Nextflow task outputs under established work ownership can be reclaimed; nf-gc is not a general work-directory cleaner;
 - uncertainty, failed/cached execution, external ownership, and unsupported target ownership resolve to retention.
 
