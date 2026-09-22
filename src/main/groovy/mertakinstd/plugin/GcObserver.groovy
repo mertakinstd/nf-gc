@@ -22,6 +22,11 @@ import java.nio.file.StandardOpenOption
 import java.util.ArrayList
 import java.util.Collections
 import java.util.List
+import java.util.Map
+import java.util.LinkedHashSet
+import java.util.Set
+import java.util.function.BiConsumer
+import java.util.function.Consumer
 
 import groovy.transform.CompileStatic
 import groovy.util.logging.Slf4j
@@ -48,6 +53,7 @@ class GcObserver implements TraceObserverV2 {
     private GcDependencyState dependencyState
     private GcOutputDependencyState outputDependencyState
     private GcArtifactRegistry artifactRegistry
+    private GcRuntimeDemandTracker runtimeDemandTracker
 
     GcObserver(GcMode gcMode) {
         if( gcMode == null )
@@ -74,10 +80,28 @@ class GcObserver implements TraceObserverV2 {
 
         this.processGraph = GcProcessGraph.from(session.dag)
         this.dependencyState = new GcDependencyState(processGraph)
-        this.outputDependencyState = gcMode == GcMode.ARTIFACT
-            ? new GcOutputDependencyState(processGraph, dependencyState)
-            : null
-        this.artifactRegistry = new GcArtifactRegistry(processGraph, session, gcMode)
+        this.outputDependencyState = new GcOutputDependencyState(processGraph, dependencyState)
+        final BiConsumer<String,String> traceSink = traceFile == null
+            ? null
+            : new BiConsumer<String,String>() {
+                @Override
+                void accept(String event, String detail) {
+                    record(event, detail)
+                }
+            }
+        this.artifactRegistry = new GcArtifactRegistry(processGraph, session, gcMode, traceSink)
+        configureWorkflowOutputProvenance()
+        this.runtimeDemandTracker = new GcRuntimeDemandTracker(
+            processGraph,
+            artifactRegistry,
+            new Consumer<Collection<GcArtifactRegistry.DeletionResult>>() {
+                @Override
+                void accept(Collection<GcArtifactRegistry.DeletionResult> results) {
+                    recordDeletions(results)
+                }
+            }
+        )
+        runtimeDemandTracker.attach()
         recordGraph(processGraph)
         log.debug "nf-gc flow begun with ${processGraph.processes.size()} processes using gc_mode=${gcMode.configValue}"
     }
@@ -98,37 +122,57 @@ class GcObserver implements TraceObserverV2 {
             return
         }
 
+        recordDeletions(artifactRegistry.onProcessTerminated(process))
+
         for( TaskProcessor closed : dependencyState.onProcessTerminate(process) ) {
             record('DEPENDENCY_CLOSED', closed.name)
             recordDeletions(artifactRegistry.onDependencyClosed(closed))
         }
 
-        if( outputDependencyState != null ) {
-            for( GcProcessGraph.OutputPort port : outputDependencyState.onProcessTerminate(process) )
-                recordDeletions(artifactRegistry.onOutputClosed(port))
-        }
+        for( GcProcessGraph.OutputPort port : outputDependencyState.onProcessTerminate(process) )
+            recordDeletions(artifactRegistry.onOutputClosed(port))
 
         log.debug "nf-gc process terminated: ${process.name}"
     }
 
 
     @Override
-    void onTaskStart(TaskEvent event) {
-        if( artifactRegistry == null )
+    void onTaskPending(TaskEvent event) {
+        final TaskRun task = event?.handler?.task
+        if( task == null )
             return
 
+        record('TASK_PENDING', taskTraceDetail(event, task))
+        if( artifactRegistry != null )
+            artifactRegistry.onTaskPending(task)
+    }
+
+    @Override
+    void onTaskStart(TaskEvent event) {
         final TaskRun task = event?.handler?.task
-        if( task != null )
+        if( task == null )
+            return
+
+        record('TASK_START', taskTraceDetail(event, task))
+
+        if( artifactRegistry != null )
             artifactRegistry.onTaskStart(task)
     }
 
     @Override
     void onTaskComplete(TaskEvent event) {
-        if( artifactRegistry == null )
-            return
-
         final TaskRun task = event?.handler?.task
         if( task == null )
+            return
+
+        /*
+         * The test trace records task completion before any reclamation caused
+         * by that completion. Semantic tests can therefore reason about public
+         * lifecycle ordering without depending on registry implementation.
+         */
+        record('TASK_COMPLETE', taskTraceDetail(event, task))
+
+        if( artifactRegistry == null )
             return
 
         final GcArtifactRegistry.Update update = artifactRegistry.onTaskComplete(task)
@@ -147,15 +191,20 @@ class GcObserver implements TraceObserverV2 {
     @Override
     void onTaskCached(TaskEvent event) {
         final TaskRun task = event?.handler?.task
-        if( task != null )
-            record('ARTIFACT_KEEP', "${task.processor?.name ?: '<unknown>'}\t${GcArtifactRegistry.KEEP_CACHED}".toString())
+        if( task == null )
+            return
+
+        record('TASK_CACHED', taskTraceDetail(event, task))
+        record('ARTIFACT_KEEP', "${task.processor?.name ?: '<unknown>'}\t${GcArtifactRegistry.KEEP_CACHED}".toString())
+        if( artifactRegistry != null )
+            recordDeletions(artifactRegistry.onTaskCached(task))
     }
 
     @Override
     void onFilePublish(FilePublishEvent event) {
         if( artifactRegistry != null && event != null )
             artifactRegistry.onFilePublish(event.source)
-        record('FILE_PUBLISH')
+        record('FILE_PUBLISH', event?.source?.toString())
         log.debug "nf-gc file published: ${event}"
     }
 
@@ -170,6 +219,8 @@ class GcObserver implements TraceObserverV2 {
 
     @Override
     void onFlowComplete() {
+        if( artifactRegistry != null )
+            recordDeletions(artifactRegistry.onFlowComplete())
         record('FLOW_COMPLETE')
         log.debug 'nf-gc flow completed'
     }
@@ -188,6 +239,46 @@ class GcObserver implements TraceObserverV2 {
             return
 
         this.traceFile = session.workDir.parent.resolve('nf-gc-events.tsv')
+    }
+
+
+
+    /**
+     * Resolve direct workflow-output provenance by channel identity. Nextflow's
+     * workflow output map already contains the broadcast-backed write channels
+     * before flow ignition, so no synthetic read subscriber is required.
+     * Unsupported/derived output channels keep the existing run-level fallback.
+     */
+    private void configureWorkflowOutputProvenance() {
+        if( session == null || artifactRegistry == null || processGraph == null )
+            return
+
+        final Map outputs = session.outputs
+        if( outputs == null || outputs.isEmpty() ) {
+            artifactRegistry.setWorkflowOutputPorts(Collections.<GcProcessGraph.OutputPort>emptySet(), true)
+            return
+        }
+
+        boolean trusted = true
+        final Set<GcProcessGraph.OutputPort> ports = new LinkedHashSet<>()
+        for( Object channel : outputs.values() ) {
+            final Set<GcProcessGraph.OutputPort> matches = processGraph.outputPortsForChannel(channel)
+            if( matches.isEmpty() ) {
+                trusted = false
+                log.warn "nf-gc could not resolve exact producer provenance for workflow-output channel ${channel?.class?.name ?: '<null>'}; nf-gc will keep the conservative workflow-output fallback"
+                continue
+            }
+            ports.addAll(matches)
+        }
+        artifactRegistry.setWorkflowOutputPorts(ports, trusted)
+    }
+
+    private static String taskTraceDetail(TaskEvent event, TaskRun task) {
+        final String taskId = event?.trace?.taskId?.toString() ?: ''
+        final String processName = task?.processor?.name ?: '<unknown>'
+        final String taskName = task?.name ?: processName
+        final String workDir = task?.workDir?.toString() ?: ''
+        return "${taskId}\t${processName}\t${taskName}\t${workDir}".toString()
     }
 
 

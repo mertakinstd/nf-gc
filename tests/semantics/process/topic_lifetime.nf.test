@@ -1,0 +1,41 @@
+nextflow_pipeline {
+
+    name "nf-gc process topic semantics"
+    script "tests/semantics/topic_lifetime.nf"
+    config "tests/config/gc_mode_process.config"
+
+    test("waits for the global flow seal when topic demand is outside the process projection") {
+        when {
+            params { publish_dir = "$launchDir/published" }
+        }
+        then {
+            assert workflow.success
+            assert workflow.trace.failed().size() == 0
+            def events = path("$launchDir/nf-gc-events.tsv").readLines()
+
+            def sourceComplete = events.findIndexOf { line ->
+                def f = line.split('\t', 5)
+                f.size() == 5 && f[0] == 'TASK_COMPLETE' && f[2] == 'TOPIC_SOURCE'
+            }
+            def consumerComplete = events.findIndexOf { line ->
+                def f = line.split('\t', 5)
+                f.size() == 5 && f[0] == 'TASK_COMPLETE' && f[2] == 'TOPIC_CONSUMER'
+            }
+            assert sourceComplete >= 0
+            assert consumerComplete > sourceComplete
+
+            def artifact = java.nio.file.Path.of(events[sourceComplete].split('\t', 5)[4]).resolve('topic.txt')
+            def deleted = events.findIndexOf { it == "ARTIFACT_DELETED\tTOPIC_SOURCE\t${artifact}" }
+            def flowComplete = events.findIndexOf { it == 'FLOW_COMPLETE' }
+
+            // PROCESS_TERMINATE is an actor/channel lifecycle event and may be
+            // observed before the final task completion. The concrete safety
+            // boundary here is the topic consumer's TASK_COMPLETE, while the
+            // registry unit contract separately pins deletion to onFlowComplete.
+            assert deleted > consumerComplete
+            assert deleted < flowComplete
+            assert !java.nio.file.Files.exists(artifact, java.nio.file.LinkOption.NOFOLLOW_LINKS)
+            assert path("$launchDir/published/topic.done").text == 'topic-payload\n'
+        }
+    }
+}

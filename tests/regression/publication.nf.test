@@ -141,48 +141,6 @@ nextflow_pipeline {
         }
     }
 
-    test("reclaims an unpublished output while preserving a published sibling") {
-        when {
-            params {
-                scenario = 'partial_publish'
-                publish_dir = "$launchDir/published"
-            }
-        }
-        then {
-            assert workflow.success
-            def events = path("$launchDir/nf-gc-events.tsv").readLines()
-            assert events.any {
-                it.startsWith('ARTIFACT_TRACKED\tPARTIAL_PUBLISH\t') &&
-                it.endsWith('sample.bam')
-            }
-            assert events.any {
-                it.startsWith('ARTIFACT_DELETED\tPARTIAL_PUBLISH\t') &&
-                it.endsWith('sample.bam')
-            }
-            assert !events.any {
-                it.startsWith('ARTIFACT_DELETED\tPARTIAL_PUBLISH\t') &&
-                it.endsWith('qc.log')
-            }
-            assert path("$launchDir/published/qc.log").exists()
-            assert !path("$launchDir/published/sample.bam").exists()
-
-            def workBams = []
-            def workQcLogs = []
-            java.nio.file.Files.walk(path(workDir)).withCloseable { stream ->
-                stream.filter {
-                    java.nio.file.Files.isRegularFile(it, java.nio.file.LinkOption.NOFOLLOW_LINKS)
-                }.forEach {
-                    if( it.fileName.toString() == 'sample.bam' )
-                        workBams << it
-                    else if( it.fileName.toString() == 'qc.log' )
-                        workQcLogs << it
-                }
-            }
-
-            assert workBams.isEmpty()
-            assert workQcLogs.size() == 1
-        }
-    }
 
     test("reclaims a file rejected by an nf-core-style filename saveAs filter") {
         when {
@@ -197,6 +155,16 @@ nextflow_pipeline {
             assert events.any {
                 it.startsWith('ARTIFACT_TRACKED\tNFCORE_DEFAULT_PUBLISH\t') &&
                 it.endsWith('versions.yml')
+            }
+            def versionsDelete = events.findIndexOf {
+                it.startsWith('ARTIFACT_DELETED\tNFCORE_DEFAULT_PUBLISH\t') &&
+                it.endsWith('versions.yml')
+            }
+            def flowComplete = events.findIndexOf { it == 'FLOW_COMPLETE' }
+            assert versionsDelete >= 0
+            assert flowComplete > versionsDelete
+            assert !events.any {
+                it.startsWith('FILE_PUBLISH\t') && it.endsWith('versions.yml')
             }
             assert events.any {
                 it.startsWith('ARTIFACT_DELETED\tNFCORE_DEFAULT_PUBLISH\t') &&
@@ -306,6 +274,31 @@ nextflow_pipeline {
         }
     }
 
+    test("reclaims an output behind a disabled publishDir directive") {
+        when {
+            params {
+                scenario = 'disabled_publish'
+                publish_dir = "$launchDir/disabled-publish"
+            }
+        }
+        then {
+            assert workflow.success
+            def events = path("$launchDir/nf-gc-events.tsv").readLines()
+            assert events.any {
+                it.startsWith('ARTIFACT_TRACKED\tDISABLED_PUBLISH\t') &&
+                it.endsWith('disabled.txt')
+            }
+            assert events.any {
+                it.startsWith('ARTIFACT_DELETED\tDISABLED_PUBLISH\t') &&
+                it.endsWith('disabled.txt')
+            }
+            assert !events.any {
+                it.startsWith('FILE_PUBLISH\t') && it.endsWith('disabled.txt')
+            }
+            assert !path("$launchDir/disabled-publish/disabled.txt").exists()
+        }
+    }
+
     test("preserves outputs selected by multiple publishDir directives") {
         when {
             params {
@@ -324,19 +317,117 @@ nextflow_pipeline {
         }
     }
 
-    test("freezes the runtime semantics of publishDir enabled false conservatively") {
+    test("retains an overlapping published tree while reclaiming an unrelated sibling") {
         when {
             params {
-                scenario = 'disabled_publish'
-                publish_dir = "$launchDir/disabled-publish"
+                scenario = 'overlapping_publish_tree'
+                publish_dir = "$launchDir/overlapping-published"
             }
         }
         then {
             assert workflow.success
             def events = path("$launchDir/nf-gc-events.tsv").readLines()
-            assert !path("$launchDir/disabled-publish/result.txt").exists()
-            assert events.contains('ARTIFACT_KEEP\tDISABLED_PUBLISH\tPUBLISH_DIR')
-            assert !events.any { it.startsWith('ARTIFACT_DELETED\tDISABLED_PUBLISH\t') }
+            def sourceComplete = events.find { line ->
+                def f = line.split('\t', 5)
+                f.size() == 5 && f[0] == 'TASK_COMPLETE' && f[2] == 'OVERLAPPING_PUBLISH_TREE'
+            }
+            assert sourceComplete != null
+
+            def workDir = java.nio.file.Path.of(sourceComplete.split('\t', 5)[4])
+            def bundle = workDir.resolve('bundle')
+            def item = bundle.resolve('item.txt')
+            def independent = workDir.resolve('independent.txt')
+
+            assert java.nio.file.Files.exists(item, java.nio.file.LinkOption.NOFOLLOW_LINKS)
+            assert !events.any { it == "ARTIFACT_DELETED\tOVERLAPPING_PUBLISH_TREE\t${bundle}" }
+            assert !events.any { it == "ARTIFACT_DELETED\tOVERLAPPING_PUBLISH_TREE\t${item}" }
+            assert events.any { it == "ARTIFACT_DELETED\tOVERLAPPING_PUBLISH_TREE\t${independent}" }
+            assert !java.nio.file.Files.exists(independent, java.nio.file.LinkOption.NOFOLLOW_LINKS)
+            assert path("$launchDir/overlapping-published/bundle/item.txt").exists()
+            assert path("$launchDir/overlapping-published/bundle/extra.txt").exists()
+        }
+    }
+
+    test("retains a declared symlink alias and its backing declared tree in artifact mode") {
+        config "tests/config/gc_mode_artifact.config"
+
+        when {
+            params {
+                scenario = 'symlink_alias_publish_tree'
+                publish_dir = "$launchDir/symlink-alias-published"
+            }
+        }
+        then {
+            assert workflow.success
+            def events = path("$launchDir/nf-gc-events.tsv").readLines()
+            def sourceComplete = events.find { line ->
+                def f = line.split('\t', 5)
+                f.size() == 5 && f[0] == 'TASK_COMPLETE' && f[2] == 'SYMLINK_ALIAS_PUBLISH_TREE'
+            }
+            assert sourceComplete != null
+
+            def workDir = java.nio.file.Path.of(sourceComplete.split('\t', 5)[4])
+            def linkdir = workDir.resolve('linkdir')
+            def item = workDir.resolve('real/item.txt')
+            def independent = workDir.resolve('independent.txt')
+
+            assert java.nio.file.Files.isSymbolicLink(linkdir)
+            assert java.nio.file.Files.exists(item, java.nio.file.LinkOption.NOFOLLOW_LINKS)
+            assert !events.any { it == "ARTIFACT_DELETED\tSYMLINK_ALIAS_PUBLISH_TREE\t${linkdir}" }
+            assert !events.any { it == "ARTIFACT_DELETED\tSYMLINK_ALIAS_PUBLISH_TREE\t${item}" }
+            assert events.any { it == "ARTIFACT_DELETED\tSYMLINK_ALIAS_PUBLISH_TREE\t${independent}" }
+            assert !java.nio.file.Files.exists(independent, java.nio.file.LinkOption.NOFOLLOW_LINKS)
+            assert path("$launchDir/symlink-alias-published/linkdir/item.txt").exists()
+            assert path("$launchDir/symlink-alias-published/linkdir/extra.txt").exists()
+        }
+    }
+
+
+    test("retains an upstream backing artifact for a published symlink output in process mode") {
+        when {
+            params {
+                scenario = 'symlink_backing_publish'
+                publish_dir = "$launchDir/symlink-backing-published"
+            }
+        }
+        then {
+            assert workflow.success
+            def events = path("$launchDir/nf-gc-events.tsv").readLines()
+            def sourceComplete = events.find { line ->
+                def f = line.split('\t', 5)
+                f.size() == 5 && f[0] == 'TASK_COMPLETE' && f[2] == 'SYMLINK_BACKING_SOURCE'
+            }
+            assert sourceComplete != null
+
+            def sourceDir = java.nio.file.Path.of(sourceComplete.split('\t', 5)[4]).resolve('source-dir')
+            assert java.nio.file.Files.exists(sourceDir.resolve('item.txt'), java.nio.file.LinkOption.NOFOLLOW_LINKS)
+            assert !events.any { it == "ARTIFACT_DELETED\tSYMLINK_BACKING_SOURCE\t${sourceDir}" }
+            assert path("$launchDir/symlink-backing-published/alias/item.txt").exists()
+        }
+    }
+
+    test("retains an upstream backing artifact for a published symlink output in artifact mode") {
+        config "tests/config/gc_mode_artifact.config"
+
+        when {
+            params {
+                scenario = 'symlink_backing_publish'
+                publish_dir = "$launchDir/symlink-backing-published"
+            }
+        }
+        then {
+            assert workflow.success
+            def events = path("$launchDir/nf-gc-events.tsv").readLines()
+            def sourceComplete = events.find { line ->
+                def f = line.split('\t', 5)
+                f.size() == 5 && f[0] == 'TASK_COMPLETE' && f[2] == 'SYMLINK_BACKING_SOURCE'
+            }
+            assert sourceComplete != null
+
+            def sourceDir = java.nio.file.Path.of(sourceComplete.split('\t', 5)[4]).resolve('source-dir')
+            assert java.nio.file.Files.exists(sourceDir.resolve('item.txt'), java.nio.file.LinkOption.NOFOLLOW_LINKS)
+            assert !events.any { it == "ARTIFACT_DELETED\tSYMLINK_BACKING_SOURCE\t${sourceDir}" }
+            assert path("$launchDir/symlink-backing-published/alias/item.txt").exists()
         }
     }
 
@@ -357,18 +448,5 @@ nextflow_pipeline {
         }
     }
 
-    test("keeps a terminal process without publishDir") {
-        when {
-            params {
-                scenario = 'terminal'
-            }
-        }
-        then {
-            assert workflow.success
-            def events = path("$launchDir/nf-gc-events.tsv").readLines()
-            assert events.contains('ARTIFACT_KEEP\tTERMINAL_SOURCE\tTERMINAL')
-            assert !events.any { it.startsWith('ARTIFACT_DELETED\tTERMINAL_SOURCE\t') }
-        }
-    }
 
 }

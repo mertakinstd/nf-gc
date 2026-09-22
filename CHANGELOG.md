@@ -2,6 +2,23 @@
 
 All notable changes to `nf-gc` are documented in this file.
 
+## 0.3.0 - 2026-09-20
+
+### Added
+
+- Added concrete-`Path` liveness for artifact mode, including task reservations, pass-through lineage, and generic runtime route sealing without operator-name interpretation.
+- Added deterministic semantic coverage plus a pinned Nextflow `26.04.6` / `nf-core/rnaseq 3.26.0` acceptance matrix for `process + link`, `artifact + link`, and `artifact + copy`.
+
+### Changed
+
+- Changed the default `gc_mode` from `process` to `artifact`; artifact mode is now the recommended normal-use policy.
+- Unified detection, ownership, retention, provenance, and deletion around the same concrete artifact model. `artifact` and `process` now differ only in reclamation timing.
+- Reworked `process` mode to keep Path/output-port identity and wait on only the relevant producer/consumer process boundaries instead of coupling unrelated sibling outputs.
+- Made exact workflow-output protection Path-specific; derived, opaque, or otherwise unresolved demand remains conservative.
+- Hardened publication semantics: synchronous hard-link publication is preferred for peak-disk reduction, while asynchronous copy-family publication is reconciled conservatively from Nextflow publication events.
+- Strengthened ownership and retention safety for staged directory descendants, pass-through outputs, overlapping output trees, symlink aliases/backings, operator-backed demand, and `topic:` outputs.
+- Moved repository developer entry points to `scripts/env.sh` and `scripts/test.sh`.
+
 ## 0.2.0 - 2026-09-15
 
 ### Added

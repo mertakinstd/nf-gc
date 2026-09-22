@@ -55,35 +55,34 @@ nextflow_pipeline {
             assert path(params.external_path).exists()
             assert path(params.external_path).text == 'external-data\n'
             assert !events.any { it.startsWith('ARTIFACT_TRACKED\tPASSTHROUGH_DEFAULT\t') }
-            assert events.any { it.startsWith('ARTIFACT_HOLD\tPASSTHROUGH_DEFAULT\t') }
             assert !events.any { it.startsWith('ARTIFACT_DELETED\tPASSTHROUGH_DEFAULT\t') }
         }
     }
 
-    test("holds an upstream artifact through a default-staged pass-through relay") {
+
+    test("does not reacquire an upstream artifact re-emitted through default staging") {
         when {
             params {
-                scenario = 'passthrough_default'
+                scenario = 'passthrough_default_ownership'
             }
         }
         then {
             assert workflow.success
             def events = path("$launchDir/nf-gc-events.tsv").readLines()
-            def hold = events.findIndexOf { it.startsWith('ARTIFACT_HOLD\tPASSTHROUGH_DEFAULT\t') }
-            def producerClosed = events.findIndexOf { it == 'DEPENDENCY_CLOSED\tGENERATED_SOURCE' }
-            def relayClosed = events.findIndexOf { it == 'DEPENDENCY_CLOSED\tPASSTHROUGH_DEFAULT' }
-            def deleted = events.findIndexOf { it.startsWith('ARTIFACT_DELETED\tGENERATED_SOURCE\t') }
-            assert hold >= 0
-            assert producerClosed >= 0
-            assert relayClosed > producerClosed
-            assert deleted > relayClosed
-            def deletedPath = events[deleted].split('\t', 3)[2]
-            assert !java.nio.file.Files.exists(path(deletedPath), java.nio.file.LinkOption.NOFOLLOW_LINKS)
-            assert !events.any { it.startsWith('ARTIFACT_TRACKED\tPASSTHROUGH_DEFAULT\t') }
+            def sourceComplete = events.find { line ->
+                def f = line.split('\t', 5)
+                f.size() == 5 && f[0] == 'TASK_COMPLETE' && f[2] == 'GENERATED_SOURCE'
+            }
+            assert sourceComplete != null
+            def source = java.nio.file.Path.of(sourceComplete.split('\t', 5)[4]).resolve('source.txt')
+            assert events.any { it == "ARTIFACT_DELETED\tGENERATED_SOURCE\t${source}" }
+            assert !events.any { it.startsWith('ARTIFACT_DELETED\tPASSTHROUGH_DEFAULT\t') }
+            assert !java.nio.file.Files.exists(source, java.nio.file.LinkOption.NOFOLLOW_LINKS)
         }
     }
 
-    test("conservatively holds an upstream artifact through a copy-staged pass-through relay") {
+
+    test("preserves an upstream artifact through a copy-staged pass-through relay until downstream process closure") {
         when {
             params {
                 scenario = 'passthrough_stage_copy'
@@ -93,14 +92,18 @@ nextflow_pipeline {
             assert workflow.success
             def events = path("$launchDir/nf-gc-events.tsv").readLines()
             def producerClosed = events.findIndexOf { it == 'DEPENDENCY_CLOSED\tGENERATED_SOURCE' }
+            def downstreamClosed = events.findIndexOf { it == 'DEPENDENCY_CLOSED\tREAD_LATE' }
             def relayClosed = events.findIndexOf { it == 'DEPENDENCY_CLOSED\tPASSTHROUGH_STAGE_COPY' }
             def deleted = events.findIndexOf { it.startsWith('ARTIFACT_DELETED\tGENERATED_SOURCE\t') }
-            assert events.any { it.startsWith('ARTIFACT_HOLD\tPASSTHROUGH_STAGE_COPY\t') }
-            assert relayClosed > producerClosed
+            assert events.any { it.startsWith('ARTIFACT_TRACKED\tGENERATED_SOURCE\t') }
+            assert !events.any { it.startsWith('ARTIFACT_TRACKED\tPASSTHROUGH_STAGE_COPY\t') }
+            assert !events.any { it.startsWith('ARTIFACT_DELETED\tPASSTHROUGH_STAGE_COPY\t') }
+            assert downstreamClosed > producerClosed
+            assert relayClosed >= downstreamClosed
+            assert deleted > downstreamClosed
             assert deleted > relayClosed
             def deletedPath = events[deleted].split('\t', 3)[2]
             assert !java.nio.file.Files.exists(path(deletedPath), java.nio.file.LinkOption.NOFOLLOW_LINKS)
-            assert !events.any { it.startsWith('ARTIFACT_TRACKED\tPASSTHROUGH_STAGE_COPY\t') }
         }
     }
 
@@ -138,6 +141,47 @@ nextflow_pipeline {
             assert deleted != null
             assert !java.nio.file.Files.exists(path(deleted.split('\t', 3)[2]), java.nio.file.LinkOption.NOFOLLOW_LINKS)
             assert !events.any { it.startsWith('ARTIFACT_DELETE_FAILED\t') }
+        }
+    }
+
+    test("does not acquire a declared descendant reached through a task-created symlink in process mode") {
+        when {
+            params {
+                scenario = 'symlink_ancestor_descendant'
+                external_path = "$launchDir/external/symlink-tree"
+            }
+        }
+        then {
+            assert workflow.success
+            def events = path("$launchDir/nf-gc-events.tsv").readLines()
+            def externalItem = path("${params.external_path}/item.txt")
+            assert externalItem.exists()
+            assert externalItem.text == 'external-symlink-descendant\n'
+            assert !events.any { it.startsWith('ARTIFACT_TRACKED\tSYMLINK_ANCESTOR_DESCENDANT\t') && it.endsWith('/alias/item.txt') }
+            assert !events.any { it.startsWith('ARTIFACT_DELETED\tSYMLINK_ANCESTOR_DESCENDANT\t') && it.endsWith('/alias/item.txt') }
+            assert events.any { it.startsWith('ARTIFACT_DELETED\tSYMLINK_ANCESTOR_DESCENDANT\t') && it.endsWith('/independent.txt') }
+        }
+    }
+
+    test("does not acquire a declared descendant reached through a task-created symlink in artifact mode") {
+        config "tests/config/gc_mode_artifact.config"
+
+        when {
+            params {
+                scenario = 'symlink_ancestor_descendant'
+                external_path = "$launchDir/external/symlink-tree"
+            }
+        }
+        then {
+            assert workflow.success
+            def events = path("$launchDir/nf-gc-events.tsv").readLines()
+            def externalItem = path("${params.external_path}/item.txt")
+            assert externalItem.exists()
+            assert externalItem.text == 'external-symlink-descendant\n'
+            assert events.contains('ARTIFACT_KEEP\tSYMLINK_ANCESTOR_DESCENDANT\tUNKNOWN')
+            assert !events.any { it.startsWith('ARTIFACT_TRACKED\tSYMLINK_ANCESTOR_DESCENDANT\t') && it.endsWith('/alias/item.txt') }
+            assert !events.any { it.startsWith('ARTIFACT_DELETED\tSYMLINK_ANCESTOR_DESCENDANT\t') && it.endsWith('/alias/item.txt') }
+            assert events.any { it.startsWith('ARTIFACT_DELETED\tSYMLINK_ANCESTOR_DESCENDANT\t') && it.endsWith('/independent.txt') }
         }
     }
 
@@ -302,6 +346,128 @@ nextflow_pipeline {
             assert deleted.size() == 2
             assert (deleted.collect { path(it.split('\t', 3)[2]).fileName.toString() } as Set) == (['sample.bam', 'sample.bai'] as Set)
             assert !events.any { it.startsWith('ARTIFACT_DELETED\tSTAGED_MULTI_SOURCE\t') && it.endsWith('/source.txt') }
+        }
+    }
+
+
+    test("falls back when an operator erases concrete Path provenance") {
+        config "tests/config/gc_mode_artifact.config"
+
+        when {
+            params {
+                scenario = 'opaque_path_alias'
+            }
+        }
+        then {
+            assert workflow.success
+            assert workflow.trace.failed().size() == 0
+
+            def events = path("$launchDir/nf-gc-events.tsv").readLines()
+            def sourceComplete = events.find { line ->
+                def f = line.split('\t', 5)
+                f.size() == 5 && f[0] == 'TASK_COMPLETE' && f[2] == 'OPAQUE_ALIAS_SOURCE'
+            }
+            assert sourceComplete != null
+
+            def source = java.nio.file.Path.of(sourceComplete.split('\t', 5)[4]).resolve('opaque-source.txt')
+            def consumerTerminated = events.findIndexOf { it == 'PROCESS_TERMINATE\tOPAQUE_ALIAS_CONSUMER' }
+            def deleted = events.findIndexOf { it == "ARTIFACT_DELETED\tOPAQUE_ALIAS_SOURCE\t${source}" }
+
+            assert consumerTerminated >= 0
+            assert deleted > consumerTerminated
+            assert !java.nio.file.Files.exists(source, java.nio.file.LinkOption.NOFOLLOW_LINKS)
+        }
+    }
+
+    test("holds an exact terminal pass-through source until relay process closure in process mode") {
+        when {
+            params {
+                scenario = 'passthrough_terminal_ownership'
+            }
+        }
+        then {
+            assert workflow.success
+            def events = path("$launchDir/nf-gc-events.tsv").readLines()
+            def sourceComplete = events.find { line ->
+                def f = line.split('\t', 5)
+                f.size() == 5 && f[0] == 'TASK_COMPLETE' && f[2] == 'GENERATED_SOURCE'
+            }
+            assert sourceComplete != null
+            def source = java.nio.file.Path.of(sourceComplete.split('\t', 5)[4]).resolve('source.txt')
+            def relayTerminated = events.findIndexOf { it == 'PROCESS_TERMINATE\tPASSTHROUGH_DEFAULT' }
+            def relayClosed = events.findIndexOf { it == 'DEPENDENCY_CLOSED\tPASSTHROUGH_DEFAULT' }
+            def deleted = events.findIndexOf { it == "ARTIFACT_DELETED\tGENERATED_SOURCE\t${source}" }
+            def flowComplete = events.findIndexOf { it == 'FLOW_COMPLETE' }
+            assert relayTerminated >= 0
+            assert relayClosed > relayTerminated
+            assert deleted > relayClosed
+            assert deleted < flowComplete
+            assert !java.nio.file.Files.exists(source, java.nio.file.LinkOption.NOFOLLOW_LINKS)
+        }
+    }
+
+    test("retains an upstream directory when a relay re-emits only a staged descendant") {
+        config "tests/config/gc_mode_artifact.config"
+
+        when {
+            params {
+                scenario = 'nested_generated_reemit'
+            }
+        }
+        then {
+            assert workflow.success
+            def events = path("$launchDir/nf-gc-events.tsv").readLines()
+            def sourceComplete = events.find { line ->
+                def f = line.split('\t', 5)
+                f.size() == 5 && f[0] == 'TASK_COMPLETE' && f[2] == 'GENERATED_DIRECTORY_SOURCE'
+            }
+            assert sourceComplete != null
+
+            def bundle = java.nio.file.Path.of(sourceComplete.split('\t', 5)[4]).resolve('bundle')
+            assert java.nio.file.Files.exists(bundle.resolve('item.txt'), java.nio.file.LinkOption.NOFOLLOW_LINKS)
+            assert java.nio.file.Files.exists(bundle.resolve('extra.txt'), java.nio.file.LinkOption.NOFOLLOW_LINKS)
+            assert !events.any { it == "ARTIFACT_DELETED\tGENERATED_DIRECTORY_SOURCE\t${bundle}" }
+            assert events.contains('ARTIFACT_KEEP\tNESTED_UPSTREAM_REEMIT\tUNKNOWN')
+        }
+    }
+
+
+    test("does not acquire a staged directory descendant as an owned artifact in process mode") {
+        when {
+            params {
+                scenario = 'nested_external_reemit'
+                external_path = "$launchDir/external/bundle"
+            }
+        }
+        then {
+            assert workflow.success
+            def events = path("$launchDir/nf-gc-events.tsv").readLines()
+            def externalItem = path("${params.external_path}/item.txt")
+            assert externalItem.exists()
+            assert externalItem.text == 'external-nested\n'
+            assert !events.any { it.startsWith('ARTIFACT_TRACKED\tNESTED_EXTERNAL_REEMIT\t') }
+            assert !events.any { it.startsWith('ARTIFACT_DELETED\tNESTED_EXTERNAL_REEMIT\t') }
+        }
+    }
+
+    test("does not acquire a staged directory descendant as an owned artifact in artifact mode") {
+        config "tests/config/gc_mode_artifact.config"
+
+        when {
+            params {
+                scenario = 'nested_external_reemit'
+                external_path = "$launchDir/external/bundle"
+            }
+        }
+        then {
+            assert workflow.success
+            def events = path("$launchDir/nf-gc-events.tsv").readLines()
+            def externalItem = path("${params.external_path}/item.txt")
+            assert externalItem.exists()
+            assert externalItem.text == 'external-nested\n'
+            assert !events.any { it.startsWith('ARTIFACT_TRACKED\tNESTED_EXTERNAL_REEMIT\t') }
+            assert !events.any { it.startsWith('ARTIFACT_DELETED\tNESTED_EXTERNAL_REEMIT\t') }
+            assert events.contains('ARTIFACT_KEEP\tNESTED_EXTERNAL_REEMIT\tUNKNOWN')
         }
     }
 

@@ -2,6 +2,8 @@ package mertakinstd.plugin
 
 import nextflow.dag.DAG
 import nextflow.processor.TaskProcessor
+import nextflow.script.ProcessConfigV1
+import nextflow.script.params.OutputsList
 import spock.lang.Specification
 
 class GcOutputDependencyStateTest extends Specification {
@@ -138,13 +140,19 @@ class GcOutputDependencyStateTest extends Specification {
         def closed = outputState.onProcessTerminate(producer)
 
         then:
+        graph.isTerminal(port)
         closed.empty
         !outputState.isClosed(port)
     }
 
     private TaskProcessor process(String name) {
+        def outputs = new OutputsList()
+        def config = Mock(ProcessConfigV1) {
+            getOutputs() >> outputs
+        }
         return Mock(TaskProcessor) {
             getName() >> name
+            getConfig() >> config
         }
     }
 

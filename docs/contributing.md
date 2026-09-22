@@ -11,7 +11,7 @@ git clone https://github.com/mertakinstd/nf-gc.git
 cd nf-gc
 
 ./scripts/bootstrap-dev.sh
-source env.sh
+source scripts/env.sh
 ```
 
 The bootstrap installs the following under `.tools/`:
@@ -20,7 +20,7 @@ The bootstrap installs the following under `.tools/`:
 - Nextflow `26.04.6`
 - nf-test `0.9.5`
 
-Downloads are checksum-verified. `env.sh` sets `JAVA_HOME`, prepends the repo-local tools to `PATH`, pins `NXF_VER=26.04.6`, and uses the repo-local `.nxf/` directory as `NXF_HOME`.
+Downloads are checksum-verified. `scripts/env.sh` sets `JAVA_HOME`, prepends the repo-local tools to `PATH`, pins `NXF_VER=26.04.6`, and uses the repo-local `.nxf/` directory as `NXF_HOME`.
 
 The bootstrap does not install system packages and never uses `sudo`, `apt`, `dnf`, Homebrew, or another package manager. Linux and macOS are supported on x86_64 and arm64/aarch64.
 
@@ -31,7 +31,7 @@ Docker is optional. It is not required for the core Gradle, synthetic Nextflow, 
 Run the core checks from the repository root:
 
 ```bash
-./test.sh
+./scripts/test.sh
 ```
 
 See [the test specification](../tests/testing.md) for the regression model and acceptance criteria.
@@ -64,7 +64,7 @@ Keep patches focused. In particular:
 
 Toolchain upgrades are deliberate compatibility changes. When updating Java, Nextflow, or nf-test:
 
-1. Change the pinned version and download artifact in `scripts/bootstrap-dev.sh` and, where applicable, `env.sh`.
+1. Change the pinned version and download artifact in `scripts/bootstrap-dev.sh` and, where applicable, `scripts/env.sh`.
 2. Update the expected checksum for artifacts whose checksum is pinned in the repository.
 3. Bootstrap from a clean `.tools/` directory.
 4. Run the complete Gradle and nf-test checks.
@@ -79,7 +79,7 @@ Public releases are tag-driven. The plugin version in `build.gradle` is paired w
 The GitHub Actions workflow is the release gate:
 
 1. Update `version` in `build.gradle` and add the release notes to `CHANGELOG.md`.
-2. Run `./test.sh` locally.
+2. Run `./scripts/test.sh` locally.
 3. Commit and push the release candidate, then wait for the `test` job to pass on that exact commit.
 4. Confirm that the plugin claim is ready in the Nextflow Registry and that the repository Actions secret `NPR_API_KEY` is configured.
 5. Tag the tested commit and push the tag, for example:
@@ -102,7 +102,7 @@ Registry credentials belong in GitHub Actions secrets or another external secret
 
 Verify at minimum:
 
-- `./test.sh` passes.
+- `./scripts/test.sh` passes.
 - Behavior changes have appropriate test coverage.
 - Relevant documentation is updated.
 - No generated build output, tool downloads, Nextflow state, credentials, or private data are included.

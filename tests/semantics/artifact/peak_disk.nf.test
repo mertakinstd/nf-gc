@@ -1,0 +1,88 @@
+nextflow_pipeline {
+
+    name "nf-gc artifact peak-disk semantics"
+    script "tests/semantics/peak_disk.nf"
+    config "tests/config/gc_mode_artifact.config"
+
+    test("reclaims conditionally unpublished hard-link intermediates at their concrete last-use boundaries") {
+        when {
+            params {
+                publish_dir = "$launchDir/published"
+                save_intermediates = false
+            }
+        }
+        then {
+            assert workflow.success
+            assert workflow.trace.failed().size() == 0
+            def events = path("$launchDir/nf-gc-events.tsv").readLines()
+            assert events.count { it == 'GC_MODE\tartifact' } == 1
+
+            def consumerCompletion = [:]
+            def deletionIndex = [:]
+
+            ['fast', 'slow'].each { sample ->
+                def sourceComplete = events.find { line ->
+                    def f = line.split('\t', 5)
+                    f.size() == 5 && f[0] == 'TASK_COMPLETE' && f[2] == 'INTERMEDIATE_SOURCE' && f[3].contains("(${sample})")
+                }
+                def consumerComplete = events.findIndexOf { line ->
+                    def f = line.split('\t', 5)
+                    f.size() == 5 && f[0] == 'TASK_COMPLETE' && f[2] == 'DIRECT_CONSUMER' && f[3].contains("(${sample})")
+                }
+                assert sourceComplete != null
+                assert consumerComplete >= 0
+
+                def workDir = java.nio.file.Path.of(sourceComplete.split('\t', 5)[4])
+                def intermediate = workDir.resolve("${sample}.intermediate.bin")
+                def summary = workDir.resolve("${sample}.summary.txt")
+                def deleted = events.findIndexOf { it == "ARTIFACT_DELETED\tINTERMEDIATE_SOURCE\t${intermediate}" }
+
+                assert deleted > consumerComplete
+                assert !events.any { it == "FILE_PUBLISH\t${intermediate}" }
+                assert events.any { it == "FILE_PUBLISH\t${summary}" }
+                assert !events.any { it == "ARTIFACT_DELETED\tINTERMEDIATE_SOURCE\t${summary}" }
+                assert !java.nio.file.Files.exists(intermediate, java.nio.file.LinkOption.NOFOLLOW_LINKS)
+                assert java.nio.file.Files.exists(summary, java.nio.file.LinkOption.NOFOLLOW_LINKS)
+                assert path("$launchDir/published/${sample}.summary.txt").exists()
+
+                consumerCompletion[sample] = consumerComplete
+                deletionIndex[sample] = deleted
+            }
+
+            def firstSample = consumerCompletion.keySet().min { consumerCompletion[it] }
+            def laterSample = consumerCompletion.keySet().find { it != firstSample }
+            assert consumerCompletion[firstSample] < consumerCompletion[laterSample]
+            assert deletionIndex[firstSample] < consumerCompletion[laterSample]
+
+            def operatorSourceComplete = events.find { line ->
+                def f = line.split('\t', 5)
+                f.size() == 5 && f[0] == 'TASK_COMPLETE' && f[2] == 'OPERATOR_SOURCE'
+            }
+            def operatorConsumerComplete = events.findIndexOf { line ->
+                def f = line.split('\t', 5)
+                f.size() == 5 && f[0] == 'TASK_COMPLETE' && f[2] == 'OPERATOR_CONSUMER'
+            }
+            def flowComplete = events.findIndexOf { it == 'FLOW_COMPLETE' }
+            assert operatorSourceComplete != null
+            assert operatorConsumerComplete >= 0
+            assert flowComplete > operatorConsumerComplete
+
+            def operatorArtifact = java.nio.file.Path.of(operatorSourceComplete.split('\t', 5)[4]).resolve('operator.intermediate.bin')
+            def operatorDeleted = events.findIndexOf { it == "ARTIFACT_DELETED\tOPERATOR_SOURCE\t${operatorArtifact}" }
+            assert operatorDeleted > operatorConsumerComplete
+            assert operatorDeleted < flowComplete
+            assert !events.any { it == "FILE_PUBLISH\t${operatorArtifact}" }
+            assert !java.nio.file.Files.exists(operatorArtifact, java.nio.file.LinkOption.NOFOLLOW_LINKS)
+
+            def reclaimedSourceNames = events.findAll {
+                it.startsWith('ARTIFACT_DELETED\tINTERMEDIATE_SOURCE\t') ||
+                it.startsWith('ARTIFACT_DELETED\tOPERATOR_SOURCE\t')
+            }.collect { java.nio.file.Path.of(it.split('\t', 3)[2]).fileName.toString() }.toSet()
+            assert reclaimedSourceNames == [
+                'fast.intermediate.bin',
+                'slow.intermediate.bin',
+                'operator.intermediate.bin'
+            ] as Set
+        }
+    }
+}

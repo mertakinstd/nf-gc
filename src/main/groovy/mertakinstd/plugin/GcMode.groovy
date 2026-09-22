@@ -21,10 +21,12 @@ import groovy.transform.CompileStatic
 /**
  * Selects the garbage-collection dependency policy.
  *
- * Process mode preserves the original conservative process-level closure.
- * Artifact mode scopes dependency closure to each producer output port while
- * remaining process-granular within that port; it never performs task-instance
- * eager reclamation.
+ * Artifact mode is the public default and follows concrete Path liveness. It
+ * reclaims an owned artifact as soon as its producer is complete, active concrete
+ * consumers are gone,
+ * future legal demand is sealed, and no retention rule applies. Process mode
+ * uses the same concrete Path/provenance model but advances liveness only at
+ * producer/consumer process boundaries. Unknown demand falls back conservatively.
  */
 @CompileStatic
 enum GcMode {
@@ -40,7 +42,7 @@ enum GcMode {
 
     static GcMode parse(Object value) {
         if( value == null )
-            return PROCESS
+            return ARTIFACT
 
         final String candidate = value.toString().trim()
         for( GcMode mode : values() ) {

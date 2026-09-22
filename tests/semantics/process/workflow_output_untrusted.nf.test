@@ -1,0 +1,31 @@
+nextflow_pipeline {
+
+    name "nf-gc process untrusted workflow-output semantics"
+    script "tests/semantics/workflow_output_untrusted.nf"
+    config "tests/config/gc_mode_process.config"
+
+    test("falls back globally when workflow-output provenance is derived and untrusted") {
+        then {
+            assert workflow.success
+            assert workflow.trace.failed().size() == 0
+
+            def events = path("$launchDir/nf-gc-events.tsv").readLines()
+            def sourceComplete = events.find { line ->
+                def fields = line.split('\t', 5)
+                fields.size() == 5 && fields[0] == 'TASK_COMPLETE' && fields[2] == 'WORKFLOW_UNTRUSTED_SOURCE'
+            }
+            assert sourceComplete != null
+
+            def sourceWork = java.nio.file.Path.of(sourceComplete.split('\t', 5)[4])
+            def published = sourceWork.resolve('published.txt')
+            def candidate = sourceWork.resolve('candidate.txt')
+
+            assert events.any { it.startsWith('WORKFLOW_OUTPUT\tderived_output\t') }
+            assert events.contains('ARTIFACT_KEEP\tWORKFLOW_UNTRUSTED_SOURCE\tWORKFLOW_OUTPUT')
+            assert !events.any { it.startsWith('ARTIFACT_DELETED\t') }
+            assert java.nio.file.Files.exists(published, java.nio.file.LinkOption.NOFOLLOW_LINKS)
+            assert java.nio.file.Files.exists(candidate, java.nio.file.LinkOption.NOFOLLOW_LINKS)
+            assert path("$launchDir/results/published/published.txt").exists()
+        }
+    }
+}

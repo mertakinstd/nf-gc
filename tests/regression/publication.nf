@@ -32,22 +32,8 @@ process PUBLISH_ALL {
     """
 }
 
-process PARTIAL_PUBLISH {
-    publishDir params.publish_dir, mode: 'copy', pattern: 'qc.log'
-
-    output:
-    path 'sample.bam', emit: bam
-    path 'qc.log', emit: qc
-
-    script:
-    """
-    echo bam > sample.bam
-    echo qc > qc.log
-    """
-}
-
 process NFCORE_DEFAULT_PUBLISH {
-    publishDir params.publish_dir, mode: 'link', saveAs: { filename ->
+    publishDir params.publish_dir, mode: params.publish_mode, saveAs: { filename ->
         filename == 'versions.yml' ? null : filename
     }
 
@@ -81,6 +67,18 @@ process NFCORE_STAR_PUBLISH {
     """
 }
 
+process DISABLED_PUBLISH {
+    publishDir params.publish_dir, mode: 'copy', enabled: false
+
+    output:
+    path 'disabled.txt'
+
+    script:
+    """
+    echo disabled > disabled.txt
+    """
+}
+
 process MULTIPLE_PUBLISH {
     publishDir params.publish_dir, mode: 'copy', pattern: 'one.txt'
     publishDir params.publish_dir_2, mode: 'copy', pattern: 'two.txt'
@@ -95,15 +93,65 @@ process MULTIPLE_PUBLISH {
     """
 }
 
-process DISABLED_PUBLISH {
-    publishDir params.publish_dir, mode: 'copy', enabled: false
+process OVERLAPPING_PUBLISH_TREE {
+    publishDir params.publish_dir, mode: 'symlink', pattern: 'bundle'
 
     output:
-    path 'result.txt'
+    path 'bundle', emit: bundle
+    path 'bundle/item.txt', emit: item
+    path 'independent.txt', emit: independent
 
     script:
     """
-    echo disabled > result.txt
+    mkdir bundle
+    echo item > bundle/item.txt
+    echo extra > bundle/extra.txt
+    echo independent > independent.txt
+    """
+}
+
+process SYMLINK_ALIAS_PUBLISH_TREE {
+    publishDir params.publish_dir, mode: 'symlink', pattern: 'linkdir'
+
+    output:
+    path 'linkdir', emit: linkdir
+    path 'real/item.txt', emit: item
+    path 'independent.txt', emit: independent
+
+    script:
+    """
+    mkdir real
+    echo item > real/item.txt
+    echo extra > real/extra.txt
+    ln -s real linkdir
+    echo independent > independent.txt
+    """
+}
+
+
+process SYMLINK_BACKING_SOURCE {
+    output:
+    path 'source-dir'
+
+    script:
+    """
+    mkdir source-dir
+    echo source > source-dir/item.txt
+    """
+}
+
+process SYMLINK_BACKING_PUBLISH {
+    publishDir params.publish_dir, mode: 'symlink'
+
+    input:
+    path source_dir
+
+    output:
+    path 'alias'
+
+    script:
+    """
+    ln -s "$source_dir" alias
     """
 }
 
@@ -116,16 +164,6 @@ process STORE_SOURCE {
     script:
     """
     echo stored > stored.txt
-    """
-}
-
-process TERMINAL_SOURCE {
-    output:
-    path 'terminal.txt'
-
-    script:
-    """
-    echo terminal > terminal.txt
     """
 }
 
@@ -163,10 +201,6 @@ workflow {
         PUBLISH_ALL()
         CONSUME_ONE(PUBLISH_ALL.out)
     }
-    else if( params.scenario == 'partial_publish' ) {
-        PARTIAL_PUBLISH()
-        CONSUME_ONE(PARTIAL_PUBLISH.out.bam)
-    }
     else if( params.scenario == 'nfcore_default_saveas' ) {
         NFCORE_DEFAULT_PUBLISH()
         CONSUME_ONE(NFCORE_DEFAULT_PUBLISH.out.result)
@@ -175,19 +209,28 @@ workflow {
         NFCORE_STAR_PUBLISH()
         CONSUME_ONE(NFCORE_STAR_PUBLISH.out.bam)
     }
-    else if( params.scenario == 'multiple_publish' ) {
-        MULTIPLE_PUBLISH()
-        CONSUME_MANY(MULTIPLE_PUBLISH.out)
-    }
     else if( params.scenario == 'disabled_publish' ) {
         DISABLED_PUBLISH()
         CONSUME_ONE(DISABLED_PUBLISH.out)
     }
+    else if( params.scenario == 'multiple_publish' ) {
+        MULTIPLE_PUBLISH()
+        CONSUME_MANY(MULTIPLE_PUBLISH.out)
+    }
+    else if( params.scenario == 'overlapping_publish_tree' ) {
+        OVERLAPPING_PUBLISH_TREE()
+        CONSUME_ONE(OVERLAPPING_PUBLISH_TREE.out.independent)
+    }
+    else if( params.scenario == 'symlink_alias_publish_tree' ) {
+        SYMLINK_ALIAS_PUBLISH_TREE()
+        CONSUME_ONE(SYMLINK_ALIAS_PUBLISH_TREE.out.independent)
+    }
+    else if( params.scenario == 'symlink_backing_publish' ) {
+        SYMLINK_BACKING_SOURCE()
+        SYMLINK_BACKING_PUBLISH(SYMLINK_BACKING_SOURCE.out)
+    }
     else if( params.scenario == 'store_dir' ) {
         STORE_SOURCE()
         CONSUME_ONE(STORE_SOURCE.out)
-    }
-    else if( params.scenario == 'terminal' ) {
-        TERMINAL_SOURCE()
     }
 }

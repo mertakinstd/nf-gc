@@ -1,0 +1,33 @@
+nextflow_pipeline {
+
+    name "nf-gc process workflow-output semantics"
+    script "tests/semantics/workflow_output.nf"
+    config "tests/config/gc_mode_process.config"
+
+    test("retains the concrete workflow output without pinning an unrelated intermediate") {
+        then {
+            assert workflow.success
+            assert workflow.trace.failed().size() == 0
+
+            def events = path("$launchDir/nf-gc-events.tsv").readLines()
+            def sourceComplete = events.find { line ->
+                def fields = line.split('\t', 5)
+                fields.size() == 5 && fields[0] == 'TASK_COMPLETE' && fields[2] == 'WORKFLOW_SOURCE'
+            }
+            assert sourceComplete != null
+            def workDir = java.nio.file.Path.of(sourceComplete.split('\t', 5)[4])
+            def finalArtifact = workDir.resolve('final.txt')
+            def intermediate = workDir.resolve('intermediate.txt')
+            def consumerTerminated = events.findIndexOf { it == 'PROCESS_TERMINATE\tWORKFLOW_CONSUMER' }
+            def deleted = events.findIndexOf { it == "ARTIFACT_DELETED\tWORKFLOW_SOURCE\t${intermediate}" }
+
+            assert events.any { it.startsWith('WORKFLOW_OUTPUT\tpublished_final\t') }
+            assert java.nio.file.Files.exists(finalArtifact, java.nio.file.LinkOption.NOFOLLOW_LINKS)
+            assert !events.any { it == "ARTIFACT_DELETED\tWORKFLOW_SOURCE\t${finalArtifact}" }
+            assert consumerTerminated >= 0
+            assert deleted > consumerTerminated
+            assert !java.nio.file.Files.exists(intermediate, java.nio.file.LinkOption.NOFOLLOW_LINKS)
+            assert path("$launchDir/results/published/final.txt").exists()
+        }
+    }
+}

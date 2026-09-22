@@ -1,0 +1,394 @@
+nextflow_pipeline {
+
+    name "nf-gc artifact semantics"
+    script "tests/semantics/model.nf"
+    config "tests/config/gc_mode_artifact.config"
+
+    test("reclaims one-to-one artifacts after their concrete consumer task completes") {
+        when {
+            params { publish_dir = "$launchDir/published" }
+        }
+        then {
+            assert workflow.success
+            assert workflow.trace.failed().size() == 0
+            def events = path("$launchDir/nf-gc-events.tsv").readLines()
+            assert events.count { it == 'GC_MODE\tartifact' } == 1
+
+            def consumerCompletions = [:]
+            def deletionIndexes = [:]
+
+            ['one', 'two'].each { sample ->
+                def sourceComplete = events.find { line ->
+                    def f = line.split('\t', 5)
+                    f.size() == 5 && f[0] == 'TASK_COMPLETE' && f[2] == 'LINEAR_SOURCE' && f[3].contains("(${sample})")
+                }
+                def consumerComplete = events.findIndexOf { line ->
+                    def f = line.split('\t', 5)
+                    f.size() == 5 && f[0] == 'TASK_COMPLETE' && f[2] == 'LINEAR_CONSUMER' && f[3].contains("(${sample})")
+                }
+                assert sourceComplete != null
+                assert consumerComplete >= 0
+                def artifact = java.nio.file.Path.of(sourceComplete.split('\t', 5)[4]).resolve("${sample}.linear.txt")
+                def deleted = events.findIndexOf { it == "ARTIFACT_DELETED\tLINEAR_SOURCE\t${artifact}" }
+                assert deleted > consumerComplete
+                assert !java.nio.file.Files.exists(artifact, java.nio.file.LinkOption.NOFOLLOW_LINKS)
+                consumerCompletions[sample] = consumerComplete
+                deletionIndexes[sample] = deleted
+            }
+
+            def firstSample = consumerCompletions.keySet().min { consumerCompletions[it] }
+            def laterSample = consumerCompletions.keySet().find { it != firstSample }
+            assert consumerCompletions[firstSample] < consumerCompletions[laterSample]
+            assert deletionIndexes[firstSample] < consumerCompletions[laterSample]
+        }
+    }
+
+    test("reclaims an output port independently of a slow sibling port") {
+        when {
+            params { publish_dir = "$launchDir/published" }
+        }
+        then {
+            assert workflow.success
+            def events = path("$launchDir/nf-gc-events.tsv").readLines()
+
+            def sourceComplete = events.find { line ->
+                def f = line.split('\t', 5)
+                f.size() == 5 && f[0] == 'TASK_COMPLETE' && f[2] == 'SIBLING_SOURCE'
+            }
+            assert sourceComplete != null
+            def workDir = java.nio.file.Path.of(sourceComplete.split('\t', 5)[4])
+            def fast = workDir.resolve('sibling-fast.txt')
+            def slow = workDir.resolve('sibling-slow.txt')
+            def fastComplete = events.findIndexOf { line ->
+                def f = line.split('\t', 5)
+                f.size() == 5 && f[0] == 'TASK_COMPLETE' && f[2] == 'SIBLING_FAST'
+            }
+            def slowComplete = events.findIndexOf { line ->
+                def f = line.split('\t', 5)
+                f.size() == 5 && f[0] == 'TASK_COMPLETE' && f[2] == 'SIBLING_SLOW'
+            }
+            def fastDeleted = events.findIndexOf { it == "ARTIFACT_DELETED\tSIBLING_SOURCE\t${fast}" }
+            def slowDeleted = events.findIndexOf { it == "ARTIFACT_DELETED\tSIBLING_SOURCE\t${slow}" }
+
+            assert fastComplete >= 0
+            assert slowComplete > fastComplete
+            assert fastDeleted > fastComplete
+            assert fastDeleted < slowComplete
+            assert slowDeleted > slowComplete
+            assert !java.nio.file.Files.exists(fast, java.nio.file.LinkOption.NOFOLLOW_LINKS)
+            assert !java.nio.file.Files.exists(slow, java.nio.file.LinkOption.NOFOLLOW_LINKS)
+        }
+    }
+
+    test("reclaims a fan-out artifact only after its concrete consumers complete") {
+        when {
+            params { publish_dir = "$launchDir/published" }
+        }
+        then {
+            assert workflow.success
+            def events = path("$launchDir/nf-gc-events.tsv").readLines()
+
+            def eligibleAfter = [:]
+            def deletionIndexes = [:]
+
+            ['one', 'two'].each { sample ->
+                def sourceComplete = events.find { line ->
+                    def f = line.split('\t', 5)
+                    f.size() == 5 && f[0] == 'TASK_COMPLETE' && f[2] == 'FANOUT_SOURCE' && f[3].contains("(${sample})")
+                }
+                def leftComplete = events.findIndexOf { line ->
+                    def f = line.split('\t', 5)
+                    f.size() == 5 && f[0] == 'TASK_COMPLETE' && f[2] == 'FANOUT_LEFT' && f[3].contains("(${sample})")
+                }
+                def rightComplete = events.findIndexOf { line ->
+                    def f = line.split('\t', 5)
+                    f.size() == 5 && f[0] == 'TASK_COMPLETE' && f[2] == 'FANOUT_RIGHT' && f[3].contains("(${sample})")
+                }
+                assert sourceComplete != null
+                assert leftComplete >= 0
+                assert rightComplete >= 0
+                def artifact = java.nio.file.Path.of(sourceComplete.split('\t', 5)[4]).resolve("${sample}.fanout.txt")
+                def deleted = events.findIndexOf { it == "ARTIFACT_DELETED\tFANOUT_SOURCE\t${artifact}" }
+                def ready = Math.max(leftComplete, rightComplete)
+                assert deleted > ready
+                assert !java.nio.file.Files.exists(artifact, java.nio.file.LinkOption.NOFOLLOW_LINKS)
+                eligibleAfter[sample] = ready
+                deletionIndexes[sample] = deleted
+            }
+
+            def firstSample = eligibleAfter.keySet().min { eligibleAfter[it] }
+            def laterSample = eligibleAfter.keySet().find { it != firstSample }
+            assert eligibleAfter[firstSample] < eligibleAfter[laterSample]
+            assert deletionIndexes[firstSample] < eligibleAfter[laterSample]
+        }
+    }
+
+    test("reclaims a pass-through source after its concrete downstream lineage completes") {
+        when {
+            params { publish_dir = "$launchDir/published" }
+        }
+        then {
+            assert workflow.success
+            def events = path("$launchDir/nf-gc-events.tsv").readLines()
+
+            def consumerCompletions = [:]
+            def deletionIndexes = [:]
+
+            ['one', 'two'].each { sample ->
+                def sourceComplete = events.find { line ->
+                    def f = line.split('\t', 5)
+                    f.size() == 5 && f[0] == 'TASK_COMPLETE' && f[2] == 'RELAY_SOURCE' && f[3].contains("(${sample})")
+                }
+                def consumerComplete = events.findIndexOf { line ->
+                    def f = line.split('\t', 5)
+                    f.size() == 5 && f[0] == 'TASK_COMPLETE' && f[2] == 'RELAY_CONSUMER' && f[3].contains("(${sample}.relay)")
+                }
+                assert sourceComplete != null
+                assert consumerComplete >= 0
+                def artifact = java.nio.file.Path.of(sourceComplete.split('\t', 5)[4]).resolve("${sample}.relay.txt")
+                def deleted = events.findIndexOf { it == "ARTIFACT_DELETED\tRELAY_SOURCE\t${artifact}" }
+                assert deleted > consumerComplete
+                assert !java.nio.file.Files.exists(artifact, java.nio.file.LinkOption.NOFOLLOW_LINKS)
+                consumerCompletions[sample] = consumerComplete
+                deletionIndexes[sample] = deleted
+            }
+
+            def firstSample = consumerCompletions.keySet().min { consumerCompletions[it] }
+            def laterSample = consumerCompletions.keySet().find { it != firstSample }
+            assert consumerCompletions[firstSample] < consumerCompletions[laterSample]
+            assert deletionIndexes[firstSample] < consumerCompletions[laterSample]
+        }
+    }
+
+    test("reclaims an unused declared output at producer-task granularity") {
+        when {
+            params { publish_dir = "$launchDir/published" }
+        }
+        then {
+            assert workflow.success
+            def events = path("$launchDir/nf-gc-events.tsv").readLines()
+
+            def producerCompletions = [:]
+            def deletionIndexes = [:]
+
+            ['one', 'two'].each { sample ->
+                def completed = events.findIndexOf { line ->
+                    def f = line.split('\t', 5)
+                    f.size() == 5 && f[0] == 'TASK_COMPLETE' && f[2] == 'UNUSED_SOURCE' && f[3].contains("(${sample})")
+                }
+                assert completed >= 0
+                def completionLine = events[completed]
+                def artifact = java.nio.file.Path.of(completionLine.split('\t', 5)[4]).resolve("${sample}.unused.txt")
+                def deleted = events.findIndexOf { it == "ARTIFACT_DELETED\tUNUSED_SOURCE\t${artifact}" }
+                assert deleted > completed
+                assert !java.nio.file.Files.exists(artifact, java.nio.file.LinkOption.NOFOLLOW_LINKS)
+                producerCompletions[sample] = completed
+                deletionIndexes[sample] = deleted
+            }
+
+            def firstSample = producerCompletions.keySet().min { producerCompletions[it] }
+            def laterSample = producerCompletions.keySet().find { it != firstSample }
+            assert producerCompletions[firstSample] < producerCompletions[laterSample]
+            assert deletionIndexes[firstSample] < producerCompletions[laterSample]
+        }
+    }
+
+    test("reclaims a zero-consumer terminal output at producer-task granularity") {
+        when {
+            params { publish_dir = "$launchDir/published" }
+        }
+        then {
+            assert workflow.success
+            def events = path("$launchDir/nf-gc-events.tsv").readLines()
+
+            def producerCompletions = [:]
+            def deletionIndexes = [:]
+
+            ['one', 'two'].each { sample ->
+                def completed = events.findIndexOf { line ->
+                    def f = line.split('\t', 5)
+                    f.size() == 5 && f[0] == 'TASK_COMPLETE' && f[2] == 'TERMINAL_SOURCE' && f[3].contains("(${sample})")
+                }
+                assert completed >= 0
+                def artifact = java.nio.file.Path.of(events[completed].split('\t', 5)[4]).resolve("${sample}.terminal.txt")
+                def deleted = events.findIndexOf { it == "ARTIFACT_DELETED\tTERMINAL_SOURCE\t${artifact}" }
+                assert deleted > completed
+                assert !java.nio.file.Files.exists(artifact, java.nio.file.LinkOption.NOFOLLOW_LINKS)
+                producerCompletions[sample] = completed
+                deletionIndexes[sample] = deleted
+            }
+
+            def firstSample = producerCompletions.keySet().min { producerCompletions[it] }
+            def laterSample = producerCompletions.keySet().find { it != firstSample }
+            assert producerCompletions[firstSample] < producerCompletions[laterSample]
+            assert deletionIndexes[firstSample] < producerCompletions[laterSample]
+        }
+    }
+
+    test("does not reclaim a shared singleton before its last concrete consumer completes") {
+        when {
+            params { publish_dir = "$launchDir/published" }
+        }
+        then {
+            assert workflow.success
+            def events = path("$launchDir/nf-gc-events.tsv").readLines()
+
+            def sourceComplete = events.find { line ->
+                def f = line.split('\t', 5)
+                f.size() == 5 && f[0] == 'TASK_COMPLETE' && f[2] == 'SHARED_INDEX'
+            }
+            assert sourceComplete != null
+            def artifact = java.nio.file.Path.of(sourceComplete.split('\t', 5)[4]).resolve('shared.index')
+            def deletion = events.findIndexOf { it == "ARTIFACT_DELETED\tSHARED_INDEX\t${artifact}" }
+            assert deletion >= 0
+
+            def completions = []
+            events.eachWithIndex { line, index ->
+                def f = line.split('\t', 5)
+                if( f.size() == 5 && f[0] == 'TASK_COMPLETE' && f[2] == 'INDEX_CONSUMER' )
+                    completions << index
+            }
+            assert completions.size() == 3
+            assert deletion > completions.max()
+            assert !java.nio.file.Files.exists(artifact, java.nio.file.LinkOption.NOFOLLOW_LINKS)
+        }
+    }
+
+    test("does not reclaim collected artifacts before the aggregate consumer completes") {
+        when {
+            params { publish_dir = "$launchDir/published" }
+        }
+        then {
+            assert workflow.success
+            def events = path("$launchDir/nf-gc-events.tsv").readLines()
+
+            def consumerComplete = events.findIndexOf { line ->
+                def f = line.split('\t', 5)
+                f.size() == 5 && f[0] == 'TASK_COMPLETE' && f[2] == 'COLLECT_CONSUMER'
+            }
+            assert consumerComplete >= 0
+
+            ['one', 'two', 'three'].each { sample ->
+                def sourceComplete = events.find { line ->
+                    def f = line.split('\t', 5)
+                    f.size() == 5 && f[0] == 'TASK_COMPLETE' && f[2] == 'COLLECT_SOURCE' && f[3].contains("(${sample})")
+                }
+                assert sourceComplete != null
+                def artifact = java.nio.file.Path.of(sourceComplete.split('\t', 5)[4]).resolve("${sample}.collect.txt")
+                def deleted = events.findIndexOf { it == "ARTIFACT_DELETED\tCOLLECT_SOURCE\t${artifact}" }
+                assert deleted > consumerComplete
+                assert !java.nio.file.Files.exists(artifact, java.nio.file.LinkOption.NOFOLLOW_LINKS)
+            }
+        }
+    }
+
+    test("does not reclaim a joined artifact before its keyed consumer completes") {
+        when {
+            params { publish_dir = "$launchDir/published" }
+        }
+        then {
+            assert workflow.success
+            def events = path("$launchDir/nf-gc-events.tsv").readLines()
+
+            def leftComplete = events.findIndexOf { line ->
+                def f = line.split('\t', 5)
+                f.size() == 5 && f[0] == 'TASK_COMPLETE' && f[2] == 'JOIN_LEFT_SOURCE' && f[3].contains('(late)')
+            }
+            def consumerComplete = events.findIndexOf { line ->
+                def f = line.split('\t', 5)
+                f.size() == 5 && f[0] == 'TASK_COMPLETE' && f[2] == 'JOIN_CONSUMER' && f[3].contains('(late)')
+            }
+            assert leftComplete >= 0
+            assert consumerComplete >= 0
+
+            def artifact = java.nio.file.Path.of(events[leftComplete].split('\t', 5)[4]).resolve('late.left.txt')
+            def deleted = events.findIndexOf { it == "ARTIFACT_DELETED\tJOIN_LEFT_SOURCE\t${artifact}" }
+            assert deleted > consumerComplete
+            assert !java.nio.file.Files.exists(artifact, java.nio.file.LinkOption.NOFOLLOW_LINKS)
+        }
+    }
+
+    test("reclaims a conditionally routed artifact after only its concrete branch completes") {
+        when {
+            params { publish_dir = "$launchDir/published" }
+        }
+        then {
+            assert workflow.success
+            def events = path("$launchDir/nf-gc-events.tsv").readLines()
+
+            def leftSource = events.find { line ->
+                def f = line.split('\t', 5)
+                f.size() == 5 && f[0] == 'TASK_COMPLETE' && f[2] == 'ROUTED_SOURCE' && f[3].contains('(left)')
+            }
+            def rightSource = events.find { line ->
+                def f = line.split('\t', 5)
+                f.size() == 5 && f[0] == 'TASK_COMPLETE' && f[2] == 'ROUTED_SOURCE' && f[3].contains('(right)')
+            }
+            def leftComplete = events.findIndexOf { line ->
+                def f = line.split('\t', 5)
+                f.size() == 5 && f[0] == 'TASK_COMPLETE' && f[2] == 'ROUTED_LEFT'
+            }
+            def rightComplete = events.findIndexOf { line ->
+                def f = line.split('\t', 5)
+                f.size() == 5 && f[0] == 'TASK_COMPLETE' && f[2] == 'ROUTED_RIGHT'
+            }
+
+            assert leftSource != null
+            assert rightSource != null
+            assert events.count { line ->
+                def f = line.split('\t', 5)
+                f.size() == 5 && f[0] == 'TASK_COMPLETE' && f[2] == 'ROUTED_LEFT'
+            } == 1
+            assert events.count { line ->
+                def f = line.split('\t', 5)
+                f.size() == 5 && f[0] == 'TASK_COMPLETE' && f[2] == 'ROUTED_RIGHT'
+            } == 1
+            assert leftComplete >= 0
+            assert rightComplete > leftComplete
+
+            def leftArtifact = java.nio.file.Path.of(leftSource.split('\t', 5)[4]).resolve('left.routed.txt')
+            def rightArtifact = java.nio.file.Path.of(rightSource.split('\t', 5)[4]).resolve('right.routed.txt')
+            def leftDeleted = events.findIndexOf { it == "ARTIFACT_DELETED\tROUTED_SOURCE\t${leftArtifact}" }
+            def rightDeleted = events.findIndexOf { it == "ARTIFACT_DELETED\tROUTED_SOURCE\t${rightArtifact}" }
+
+            assert leftDeleted > leftComplete
+            assert leftDeleted < rightComplete
+            assert rightDeleted > rightComplete
+            assert !java.nio.file.Files.exists(leftArtifact, java.nio.file.LinkOption.NOFOLLOW_LINKS)
+            assert !java.nio.file.Files.exists(rightArtifact, java.nio.file.LinkOption.NOFOLLOW_LINKS)
+        }
+    }
+
+    test("retains the published artifact without pinning its unpublished sibling") {
+        when {
+            params { publish_dir = "$launchDir/published" }
+        }
+        then {
+            assert workflow.success
+            def events = path("$launchDir/nf-gc-events.tsv").readLines()
+
+            def sourceComplete = events.find { line ->
+                def f = line.split('\t', 5)
+                f.size() == 5 && f[0] == 'TASK_COMPLETE' && f[2] == 'PARTIAL_PUBLISH'
+            }
+            def consumerComplete = events.findIndexOf { line ->
+                def f = line.split('\t', 5)
+                f.size() == 5 && f[0] == 'TASK_COMPLETE' && f[2] == 'EPHEMERAL_CONSUMER'
+            }
+            assert sourceComplete != null
+            assert consumerComplete >= 0
+            def workDir = java.nio.file.Path.of(sourceComplete.split('\t', 5)[4])
+            def published = workDir.resolve('semantic.published.txt')
+            def ephemeral = workDir.resolve('semantic.ephemeral.txt')
+            def ephemeralDeleted = events.findIndexOf { it == "ARTIFACT_DELETED\tPARTIAL_PUBLISH\t${ephemeral}" }
+
+            assert events.any { it == "FILE_PUBLISH\t${published}" }
+            assert !events.any { it == "ARTIFACT_DELETED\tPARTIAL_PUBLISH\t${published}" }
+            assert ephemeralDeleted > consumerComplete
+            assert java.nio.file.Files.exists(published, java.nio.file.LinkOption.NOFOLLOW_LINKS)
+            assert !java.nio.file.Files.exists(ephemeral, java.nio.file.LinkOption.NOFOLLOW_LINKS)
+            assert path("$launchDir/published/semantic.published.txt").exists()
+            assert !path("$launchDir/published/semantic.ephemeral.txt").exists()
+        }
+    }
+}

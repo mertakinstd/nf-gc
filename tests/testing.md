@@ -1,153 +1,293 @@
-# Test specification
+# Testing nf-gc
 
-## Purpose
+The functional suite is the behavioral contract for nf-gc. It is intentionally
+organized around externally observable Nextflow lifecycle semantics rather than
+around the current implementation classes.
 
-The functional suite is the behavioral contract for nf-gc. A passing case means that the described workflow situation is currently supported with the stated retention or reclamation semantics. The suite documents present behavior, not an aspirational implementation.
+A behavior change should be expressed in the functional contract before the
+implementation is changed. A failing contract is useful evidence that the
+runtime behavior does not yet implement the intended semantics; unrelated
+contracts must remain stable.
 
-When a new behavior is proposed, its functional case is written first. The existing implementation is then run against that case: an expected failure establishes the missing capability; an unexpected pass is investigated before the behavior is considered supported. Implementation changes follow only after the expected contract is explicit.
+## Test layers
 
-## Validation model
+### Semantic contract
 
-`./test.sh` runs the complete validation stack from the repository root:
+`tests/semantics/` owns normal artifact-lifetime behavior.
 
-1. Gradle/Spock tests for deterministic plugin contracts;
-2. plugin assembly and repo-local installation;
-3. all 46 nf-test functional cases against real Nextflow work directories and filesystem state, including the `artifact`-mode output-port closure contract in F44-F46.
+`tests/semantics/model.nf` is the shared model workflow for both GC policies. A
+single workflow execution contains the nf-gc-relevant lifetime relationships:
 
-Cases F41-F43 derive from nf-core/rnaseq 3.26.0 publication semantics and pin both null and non-null `saveAs` branches under hard-link publication.
+- one producer task to one consumer task;
+- independent sibling output ports;
+- one artifact fanning out to multiple consumers;
+- pass-through / re-emitted artifacts;
+- declared outputs with no downstream demand;
+- terminal declared outputs;
+- one singleton artifact consumed by multiple task instances;
+- delayed demand created by `collect`;
+- keyed delayed demand created by `join`;
+- runtime conditional routing where each artifact reaches only one concrete branch;
+- partial publication where one sibling is published and another is not.
 
-The functional cases below are the externally observable support matrix. Event traces establish lifecycle ordering and classification; filesystem assertions establish the actual retention or deletion result. The shared test configuration selects `nfGc.gc_mode = 'process'` explicitly, and topology tests assert the resolved mode in the lifecycle trace so the current contract remains attached to a named GC policy as additional modes are introduced.
+The model is intentionally domain-neutral. It represents Nextflow semantics,
+not a synthetic scientific pipeline.
 
-## Functional behavior contract
+The same model is evaluated separately under:
 
-### Lifecycle integration
+- `tests/semantics/process/` for the concrete-Path process clock;
+- `tests/semantics/artifact/` for the concrete task/runtime artifact clock.
 
-| ID | Supported situation | Expected nf-gc behavior | Evidence |
-| --- | --- | --- | --- |
-| F01 | One producer process runs multiple tasks and fans each result into two downstream processes. | Flow boundaries are observed once, each process is created/terminated once at process scope, and producer termination precedes both consumer terminations. | `runs a producer with two downstream consumers` |
+A semantic test should state one GC proposition. Structural assertions may
+establish the prerequisite lifecycle events, but the test should have one
+primary KEEP/DELETE/timing claim. Semantic tests are the executable
+specification of how nf-gc should behave; they must not exist merely to prove
+that a rejected design, an uninstantiated branch, or a historical implementation
+detail is absent. A negative assertion is appropriate only when it expresses a
+real GC invariant, such as keeping a live artifact until its final legal demand
+has completed.
 
-### Representative RNA-seq topology
+#### Semantic contract catalogue
 
-| ID | Supported situation | Expected nf-gc behavior | Evidence |
-| --- | --- | --- | --- |
-| F02 | A multi-sample RNA-seq-like graph combines a shared index, fan-out, two ALIGN output ports, joins, aggregation, publication, and an optional QC branch that is enabled. | Under `gc_mode = process`, the process graph matches the realized topology; each producer closes only after every immediate consumer terminates; internal index/read/BAM/count/quant/QC/merge artifacts are reclaimed after closure; `ALIGN_QC` is retained by `publishDir`; terminal `REPORT` is retained; published QC files survive. | `handles shared index, fan-out, join and aggregation` |
-| F03 | The same RNA-seq-like workflow runs with the optional `EXTRA_QC` branch disabled. | Under `gc_mode = process`, the unrealized branch creates no process, edge, closure, or artifact state; the remaining graph closes and reclaims normally, while publication and terminal retention remain unchanged. | `handles an optional branch that is not instantiated` |
+Each semantic test below has one product-level purpose. The two modes share one
+ownership/retention model and differ only in the liveness evidence required before
+reclaiming an eligible Path.
 
-### Cached execution
+| Mode | Test | GC proposition |
+| --- | --- | --- |
+| artifact | `reclaims one-to-one artifacts after their concrete consumer task completes` | A concrete artifact is reclaimed after its own consumer task completes, without waiting for sibling task instances or process termination. |
+| artifact | `reclaims an output port independently of a slow sibling port` | An artifact on one output port is not kept alive by an unrelated sibling output port. |
+| artifact | `reclaims a fan-out artifact only after its concrete consumers complete` | A fan-out artifact stays live until all of its concrete consumers finish, then is reclaimed independently of other artifact instances. |
+| artifact | `reclaims a pass-through source after its concrete downstream lineage completes` | Re-emission does not extend an artifact beyond the lifetime of its own concrete downstream lineage. |
+| artifact | `reclaims an unused declared output at producer-task granularity` | A declared output with no legal downstream demand is reclaimed as soon as its producer task makes that fact actionable. |
+| artifact | `reclaims a zero-consumer terminal output at producer-task granularity` | A non-retained terminal artifact with no legal consumer is reclaimed per producer task rather than waiting for the producer process. |
+| artifact | `does not reclaim a shared singleton before its last concrete consumer completes` | A shared artifact remains live while any concrete consumer task still requires it. |
+| artifact | `does not reclaim collected artifacts before the aggregate consumer completes` | Buffered/aggregated demand prevents premature reclamation before the aggregate consumer completes. |
+| artifact | `does not reclaim a joined artifact before its keyed consumer completes` | Delayed keyed demand prevents premature reclamation before the corresponding joined consumer completes. |
+| artifact | `reclaims a conditionally routed artifact after only its concrete branch completes` | Runtime routing follows the concrete branch taken by an artifact; untaken potential branches do not extend its lifetime. |
+| artifact | `retains the published artifact without pinning its unpublished sibling` | Publication protects only the concrete published artifact; an unpublished sibling follows normal artifact GC. |
+| artifact | `retains the concrete workflow output without pinning an unrelated intermediate` | Exact workflow-output retention is mode-independent and does not globally pin unrelated intermediates. |
+| artifact | `retains an upstream concrete artifact when its pass-through lineage is a workflow output` | Workflow-output retention follows exact same-Path pass-through lineage back to the owned upstream artifact. |
+| artifact | `falls back globally when workflow-output provenance is derived and untrusted` | A derived/unmatched workflow-output channel makes artifact reclamation conservative for the run rather than guessing provenance. |
+| artifact | `retains overlapping declared Paths as one conservative physical tree` | Ancestor/descendant outputs are retained together so deleting one declaration cannot corrupt an active consumer, publication, or workflow output; unrelated siblings remain independently collectible. |
+| artifact | `reclaims conditionally unpublished hard-link intermediates at their concrete last-use boundaries` | A hard-link `publishDir` whose `saveAs` rejects an intermediate does not create an artificial publication hold; direct and operator-backed intermediates are reclaimed during the run once their real demand closes, while published siblings remain retained. |
+| artifact | `does not treat a topic file as terminal before its topic demand completes` | A `topic:` output is not reclaimed merely because its normal DAG edge is a leaf; topic demand must complete before reclamation. |
+| process | `reclaims one-to-one artifacts only after the consumer process terminates` | Process mode uses consumer-process closure rather than individual consumer-task completion. |
+| process | `reclaims sibling output ports at their own consumer-process boundaries` | Process mode keeps concrete Path identity and output-port provenance, but waits for the producer and that Path's downstream consumer processes rather than individual consumer tasks. |
+| process | `waits for every fan-out consumer process before reclaiming producer artifacts` | Process mode retains a fan-out producer artifact until every downstream consumer process closes. |
+| process | `holds pass-through sources until the downstream relay process terminates` | Exact pass-through lineage keeps the upstream Path identity, while process mode advances it at the relay's process-level route boundary. |
+| process | `reclaims an unused output at producer-process termination without waiting for a used sibling` | A terminal Path has no consumer-process dependency, so process mode reclaims it after its producer process terminates even when another output port remains live. |
+| process | `reclaims terminal-process outputs at coarse process closure` | Ordinary terminal Paths are reclaimed after their producer process terminates; topic-backed or otherwise process-invisible demand still requires the appropriate route/global seal. |
+| process | `holds a shared singleton until the consumer process terminates` | A shared artifact remains retained until its consumer process closes in process mode. |
+| process | `holds collected inputs until the aggregate consumer process terminates` | Aggregated inputs remain retained until the aggregate consumer process closes. |
+| process | `holds joined inputs until the keyed consumer process terminates` | Joined inputs remain retained until the keyed consumer process closes. |
+| process | `keeps conditionally routed artifacts coupled until every potential consumer process terminates` | Process mode follows the coarse process graph, so potential routed consumer processes participate in closure. |
+| process | `retains the published artifact while reclaiming its sibling after its consumer process terminates` | Publication protects the selected artifact while its unpublished sibling follows process-level GC. |
+| process | `reclaims the same hard-link intermediates only after process-level closure` | The publication-aware fixture has the same eventual reclaim set as artifact mode, but process mode waits for the corresponding process-level closure. |
+| process | `retains the concrete workflow output without pinning an unrelated intermediate` | Exact workflow-output retention is shared with artifact mode; unrelated eligible intermediates follow process-level closure. |
+| process | `retains an upstream concrete artifact when its pass-through lineage is a workflow output` | Exact workflow-output retention propagates through same-Path pass-through lineage in process mode as well. |
+| process | `falls back globally when workflow-output provenance is derived and untrusted` | Derived/unmatched workflow-output provenance is conservative in both modes. |
+| process | `waits for the global flow seal when topic demand is outside the process projection` | Process mode does not treat topic-backed demand as closed merely because no ordinary process consumer is visible. |
 
-| ID | Supported situation | Expected nf-gc behavior | Evidence |
-| --- | --- | --- | --- |
-| F04 | A process result is restored from a pre-existing `storeDir` cache instead of being produced by a new successful task. | The cached task is classified `CACHED`; its artifact is not acquired, tracked, or deleted; the cached file remains intact. | `keeps a task restored from storeDir cache` |
+Field-derived lifetime cases also use small dedicated fixtures when adding them to
+the shared model would make every semantic assertion pay for unrelated mechanics.
+`tests/semantics/peak_disk.nf` models the publication-aware shape that matters for
+large intermediates: conditional `saveAs`, hard-link publication, direct demand,
+and operator-backed demand. `tests/semantics/topic_lifetime.nf` covers the
+Nextflow `topic:` demand surface that is not represented by an ordinary producer
+DAG edge.
 
-### Failure and deletion outcomes
+Workflow-output cases use small dedicated fixtures because declaring a workflow
+output changes the run-global Nextflow output surface. Keeping those declarations
+outside the shared model prevents them from changing unrelated semantic cases.
+The pass-through and untrusted-provenance fixtures separately cover the two
+run-level retention boundaries that cannot coexist with the direct-specificity
+contract in a single execution. `tests/semantics/overlapping_outputs.nf` covers
+filesystem containment: ancestor/descendant declared outputs are one physical
+tree for deletion safety even though Nextflow exposes them as separate output
+Paths.
 
-| ID | Supported situation | Expected nf-gc behavior | Evidence |
-| --- | --- | --- | --- |
-| F05 | A task writes a declared output and then fails under `errorStrategy 'ignore'`. | Partial output from the failed task is not acquired for GC; the task resolves conservatively as `UNKNOWN` and the file remains. | `keeps outputs from a failed task` |
-| F06 | Workflow termination aborts a still-running task after another task fails fast. | The aborted task is neither tracked nor reclaimed during shutdown. | `does not clean an aborted task during workflow termination` |
-| F07 | A process fails its first attempt, retries successfully, and the successful output is consumed downstream. | The failed attempt is retained conservatively; only the successful attempt becomes an owned artifact and is reclaimed after normal dependency closure. | `keeps the failed retry attempt and deletes the successful attempt normally` |
-| F08 | A downstream task removes an upstream owned artifact before nf-gc reaches deletion. | The absent artifact is reported as `ARTIFACT_MISSING`; absence is not treated as a deletion error and does not fail the workflow. | `reports a missing artifact without failing the workflow` |
-| F09 | An owned directory cannot be removed because the filesystem rejects deletion. | The failure is reported as `ARTIFACT_DELETE_FAILED`; no successful-deletion event is emitted; the artifact remains and the workflow itself is not failed by GC. | `reports a filesystem deletion failure without failing the workflow` |
+### Regression contract
 
-### Ownership and filesystem semantics
+`tests/regression/` owns exceptional execution mechanics and narrow Nextflow
+integration regressions rather than the normal liveness policy. This includes:
 
-| ID | Supported situation | Expected nf-gc behavior | Evidence |
-| --- | --- | --- | --- |
-| F10 | An external file is staged with Nextflow's default staging and a process generates a new output from it. | The external source remains outside GC ownership; only the generated declared output is acquired and reclaimed. | `keeps an external input with default staging and deletes only generated output` |
-| F11 | The same external-input pattern uses `stageInMode 'copy'`. | Copy staging does not transfer ownership of the external source; only the generated output is acquired and reclaimed. | `keeps an external input when stageInMode is copy` |
-| F12 | A process re-emits an external staged input with `includeInputs: true`. | The relay does not acquire the staged input as its own artifact; the path is held rather than tracked/deleted by the relay, and the external source survives. | `does not acquire ownership when an external staged input is re-emitted` |
-| F13 | A generated upstream artifact is passed through a default-staged relay and consumed later. | The relay holds the upstream artifact; producer closure alone is insufficient for deletion; reclamation occurs only after the relay dependency also closes; the relay never becomes the owner. | `holds an upstream artifact through a default-staged pass-through relay` |
-| F14 | The same generated pass-through uses `stageInMode 'copy'` at the relay. | The upstream artifact is conservatively held through relay closure and reclaimed only afterwards; the relay copy is not acquired as a new owned artifact. | `conservatively holds an upstream artifact through a copy-staged pass-through relay` |
-| F15 | A declared generated output is a symbolic link to an external file. | The owned symlink is reclaimed without following or deleting its external target. | `deletes a generated symlink without following its external target` |
-| F16 | A declared directory artifact contains both generated content and a symlink to an external file. | Recursive reclamation removes the owned directory tree without following the embedded symlink; the external target survives. | `recursive directory cleanup does not follow an external symlink` |
-| F17 | One glob declaration realizes multiple output files. | Every realized matching file becomes an owned artifact and is reclaimed independently; no synthetic missing artifact is invented. | `tracks every realized file in a glob output` |
-| F18 | A process declares one required output and one optional output that is not realized. | Only the realized required path enters the artifact lifecycle; the absent optional declaration does not create a tracked or missing artifact. | `does not invent a missing artifact for an absent optional output` |
-| F19 | A task work directory contains two declared outputs, undeclared tool/scratch files, and Nextflow `.command.*` infrastructure. | Only the two declared runtime outputs are acquired and reclaimed; undeclared side files and Nextflow task infrastructure remain untouched. | `reclaims only declared outputs from a task with undeclared side files` |
-| F20 | A tool log is explicitly declared as a process output alongside another file. | Artifact ownership is determined by Nextflow output provenance rather than extension or purpose; both declared files are acquired and reclaimed. | `reclaims a log when the log is a declared process output` |
-| F21 | A glob declaration realizes three BAM outputs while the same task creates an undeclared log. | All three realized BAMs are acquired/reclaimed; the non-matching undeclared log is not acquired and remains in the work directory. | `tracks all realized glob outputs without acquiring an undeclared side file` |
-| F22 | A tuple output combines scalar metadata with two path members. | Only filesystem path members become GC artifacts; tuple metadata remains outside the artifact model. | `tracks only path members of a tuple output` |
-| F23 | A process declares a nested directory as its output while leaving unrelated files in the same task work directory. | The declared directory is treated as one owned artifact and reclaimed recursively; unrelated task files and Nextflow infrastructure are not cleaned. | `reclaims a declared directory without cleaning unrelated task files` |
-| F24 | One task contains a staged external input plus multiple generated declared outputs. | The staged input remains unowned and its external source survives; each generated output is independently acquired and reclaimed. | `keeps a staged external input while reclaiming multiple generated outputs` |
+- failed, aborted, retried, cached, missing, and deletion-failure tasks;
+- external ownership and staging modes, including declared descendants of staged directories;
+- symlink and directory deletion safety, including task-created symlink ancestors, aliases between declared output trees, and retained symlink outputs backed by upstream owned artifacts;
+- glob, tuple, optional, and undeclared side-file ownership;
+- concrete `publishDir` modes, `saveAs`, and `storeDir`;
+- scoped module aliases and zero-task graphs;
+- retained exact pass-through outputs whose physical storage is still owned by an upstream task.
 
-### Publication and retention surfaces
+A normal lifecycle topology should not be duplicated in regression merely to
+restate the process or artifact policy.
 
-Publication retention follows the artifact selected for publication. A `publishDir` therefore protects matching outputs without shielding unpublished siblings from their normal GC lifecycle. Ambiguous publication configuration remains conservative.
+### Deterministic unit tests
 
-| ID | Supported situation | Expected nf-gc behavior | Evidence |
-| --- | --- | --- | --- |
-| F25 | `publishDir` selects an artifact using `mode: 'copy'`. | The selected work artifact is protected from GC and the published copy remains valid. | `preserves an artifact published with copy mode` |
-| F26 | `publishDir` selects an artifact using `mode: 'copyNoFollow'`. | The selected work artifact is protected from GC without changing publication-mode semantics. | `preserves an artifact published with copyNoFollow mode` |
-| F27 | `publishDir` selects an artifact using hard-link mode `link`. | The selected source artifact is protected so the published hard link is not invalidated by GC. | `preserves an artifact published with hard-link mode` |
-| F28 | `publishDir` selects an artifact using absolute symlink mode `symlink`. | The selected source artifact is protected and the published symlink remains usable. | `preserves an artifact published with absolute-symlink mode` |
-| F29 | `publishDir` selects an artifact using relative symlink mode `rellink`. | The selected source artifact is protected and the published relative symlink remains usable. | `preserves an artifact published with relative-symlink mode` |
-| F30 | `publishDir` selects an artifact using `mode: 'move'`. | nf-gc does not acquire the selected artifact while Nextflow transfers ownership to the publish destination. | `does not acquire an artifact published with move mode` |
-| F31 | A declared output is both selected by `publishDir` and consumed downstream. | Publication protection takes precedence for that artifact: it is not acquired for GC and the published result survives. | `preserves an output selected by publishDir while it is consumed downstream` |
-| F32 | A task produces a QC/log artifact and a BAM artifact; the `publishDir` pattern publishes only the QC/log while the BAM is consumed downstream. | Publication protects only the selected QC/log artifact. The QC/log remains in work and in the publish directory; the unpublished BAM is acquired normally and reclaimed after its downstream dependency closes. | `reclaims an unpublished output while preserving a published sibling` |
-| F33 | A task has multiple `publishDir` directives selecting different outputs. | Publication selection is the union of the directives; each selected artifact is protected and both published destinations survive. | `preserves outputs selected by multiple publishDir directives` |
-| F34 | A task declares `publishDir` with `enabled: false`. | **Current contract:** configured `publishDir` is still treated conservatively as `PUBLISH_DIR`; no file is published, but the task output is retained rather than reclaimed. | `freezes the runtime semantics of publishDir enabled false conservatively` |
-| F35 | A process writes through `storeDir`, so its target directory differs from normal task work ownership. | The output is classified `TARGET_DIR`, is not acquired/reclaimed by nf-gc, and the stored artifact survives. | `keeps storeDir outputs outside task work ownership` |
-| F36 | A process has no downstream consumers and no `publishDir`. | Terminal-process outputs are classified `TERMINAL` and retained rather than reclaimed. | `keeps a terminal process without publishDir` |
+`src/test/` covers implementation-local data structures and safety rules. Unit
+tests may inspect internal classes. Functional semantic tests must not use an
+internal registry/state class as their oracle.
 
-### Process topology and closure
+## Observable lifecycle trace
 
-| ID | Supported situation | Expected nf-gc behavior | Evidence |
-| --- | --- | --- | --- |
-| F37 | One process produces two output ports consumed by a fast and a slow downstream process. | Under `gc_mode = process`, closure is process-level: neither source artifact is reclaimed when only the fast branch finishes; both are reclaimed only after all immediate consumers terminate and the producer closes. | `waits for the slow consumer before deleting either output port` |
-| F38 | The same module implementation is instantiated under different aliases/scopes in nested workflows. | Scoped process identities remain distinct; graph edges do not cross aliases, and each instance's artifact is reclaimed under its own dependency chain. | `keeps aliased module instances distinct across nested workflow scope` |
-| F39 | A process graph is instantiated over an empty channel and therefore runs zero tasks. | The process edge still exists; each process dependency closes exactly once; no artifact is invented, tracked, deleted, or reported as a deletion failure. | `closes a zero-task process graph without inventing artifacts` |
+Functional tests enable `NF_GC_TEST_TRACE` through `tests/nextflow.config`.
+External acceptance or field runs must do the same through Nextflow's config
+`env` scope, for example `env.NF_GC_TEST_TRACE = 'true'`. The observer reads
+`Session.config.env` intentionally; a host-shell `export NF_GC_TEST_TRACE=true`
+alone does not enable the trace. This is test-only observability and is not part
+of the public nf-gc config API.
 
-### Artifact-mode topology contract
+The observer exposes stable lifecycle boundaries including:
 
-These cases define the implemented `artifact` policy. The contract remains conservative: an artifact may be reclaimed only after its producer process and every downstream process reachable from that artifact's producer output port have terminated. Sibling output ports do not extend one another's lifetime, and the policy remains process-granular within each port rather than reclaiming individual task instances eagerly.
+```text
+FLOW_CREATE
+FLOW_BEGIN
+PROCESS_CREATE
+TASK_PENDING
+TASK_START
+TASK_COMPLETE
+TASK_CACHED
+FILE_PUBLISH
+WORKFLOW_OUTPUT
+PROCESS_TERMINATE
+DEPENDENCY_CLOSED
+ARTIFACT_TRACKED
+ARTIFACT_ROUTE
+OUTPUT_PORT_CLOSED
+RUNTIME_ROUTE_SEALED
+ARTIFACT_HOLD
+ARTIFACT_KEEP
+ARTIFACT_DELETED
+FLOW_COMPLETE
+```
 
-| ID | Intended situation | Expected nf-gc behavior | Evidence |
-| --- | --- | --- | --- |
-| F44 | One producer emits independent `fast` and `slow` output ports to independent consumers. | Under `gc_mode = artifact`, `fast.txt` is reclaimed after `FAST_CONSUMER` terminates even while `SLOW_CONSUMER` and the producer's process-level dependency closure remain open; `slow.txt` remains until its own consumer terminates. | `reclaims an independent output port before a slow sibling in artifact mode` |
-| F45 | One producer emits a single artifact that fans out to both a fast and a slow consumer. | Artifact mode remains conservative within an output port: the shared artifact is retained after the fast consumer terminates and is reclaimed only after the slow consumer also terminates. | `keeps a shared output until every consumer terminates in artifact mode` |
-| F46 | The RNA-seq-like `ALIGN` process emits `genome_bam` to `SORT` plus `ALIGN_QC`, and `transcript_bam` independently to `QUANT`. | Each output port closes against its own consumer set: genome BAMs are reclaimable after both genome consumers terminate without waiting for `QUANT` or process-level `ALIGN` closure; transcript BAMs remain until `QUANT` terminates. Publication protection for `ALIGN_QC` outputs remains unchanged. | `reclaims ALIGN output ports by their own consumer sets in artifact mode` |
+Task lifecycle records include the Nextflow task identity, process name, task
+name/tag, and work directory. `TASK_COMPLETE` is recorded before any nf-gc
+reclamation triggered by that completion so tests can make an unambiguous
+ordering assertion.
 
-### Workflow outputs
+The route events are diagnostic evidence for the clock, not additional GC
+policy. Their tab-separated payloads are:
 
-| ID | Supported situation | Expected nf-gc behavior | Evidence |
-| --- | --- | --- | --- |
-| F40 | A non-terminal intermediate is explicitly exposed through the Nextflow workflow-output publication surface while also feeding a downstream consumer. | The artifact is classified `WORKFLOW_OUTPUT`, is not reclaimed from work, and the workflow-output copy is published successfully. | `keeps a non-terminal artifact selected as a workflow output` |
+```text
+ARTIFACT_ROUTE        <path> <port> <route-kind> <demand-kind> <consumers> <global-seal>
+OUTPUT_PORT_CLOSED    <port> <route-kind> <consumers> <global-seal>
+RUNTIME_ROUTE_SEALED  <port> <route-kind> <consumers> <global-seal>
+```
 
-### nf-core/rnaseq publication semantics
+`<port>` is the producer process plus the identity of the exact Nextflow channel
+object (for example `STAR_ALIGN@4ab12cd`). It is intentionally a run-local
+correlation key, not a stable public identifier. `route-kind` describes the DAG
+shape (`DIRECT`, `TERMINAL`, or `FALLBACK`); `demand-kind` is the stricter
+artifact-clock classification and can fall back even when the graph route itself
+is direct. Consumer names are comma-separated and may be empty. `ARTIFACT_ROUTE`
+is emitted only when exact Path-to-port provenance exists. The same port key
+appearing later in `OUTPUT_PORT_CLOSED` or `RUNTIME_ROUTE_SEALED` lets a field
+test distinguish a concrete task-use delay from a process or operator-route
+sealing delay without reimplementing the Nextflow graph in the test harness.
 
-These cases mirror publication idioms used by nf-core/rnaseq 3.26.0: pipeline-wide filename filtering through `saveAs`, parameter-gated STAR intermediates, and hard-link publication. For link-family modes, nf-gc uses Nextflow's actual synchronous file-publication event instead of evaluating the `saveAs` closure a second time. Async publication with `saveAs` remains conservative.
+`ARTIFACT_HOLD` records an explicit coarse process/global fallback hold. Exact
+pass-through provenance can instead extend the same artifact's downstream
+liveness directly, so absence of `ARTIFACT_HOLD` is not evidence that an
+artifact is unprotected. Safety tests should assert ownership and lifecycle
+ordering at the relevant deletion boundary rather than require this event for
+exact lineage.
 
-| ID | Supported situation | Expected nf-gc behavior | Evidence |
-| --- | --- | --- | --- |
-| F41 | An nf-core-style default `publishDir` has no pattern and uses `saveAs` to reject only `versions.yml` while publishing a sibling result. | The published result is protected; `versions.yml`, for which Nextflow emits no publication event, is not publication-protected and may be reclaimed after process dependency closure. | `reclaims a file rejected by an nf-core-style filename saveAs filter` |
-| F42 | A STAR-like task emits `sample.bam`, `Log.final.out`, and `SJ.out.tab`; logs are selected by pattern, while the matching BAM is gated by `saveAs` with `save_align_intermeds = false`. | STAR logs remain published/protected; the BAM is not published, enters the normal GC lifecycle, and is reclaimed after its downstream consumer closes. | `reclaims an nf-core-style gated BAM when save_align_intermeds is false` |
-| F43 | The same STAR-like publication surface runs with `save_align_intermeds = true`. | The BAM receives a non-null `saveAs` result, is published alongside the logs, and is never acquired or reclaimed by nf-gc. | `preserves an nf-core-style gated BAM when save_align_intermeds is true` |
+`FILE_PUBLISH` records the concrete source path supplied by Nextflow. Tests can
+therefore distinguish publication of one artifact from retention of an
+unrelated sibling without reproducing `publishDir` selection logic themselves.
 
-## Current boundaries encoded by the suite
+For async `publishDir saveAs`, nf-gc deliberately does not re-run the user closure.
+A candidate that has not yet emitted `FILE_PUBLISH` remains held during the run.
+On successful `FLOW_COMPLETE`, Nextflow has already drained the publication pool.
+When that directive also has `failOnError` enabled, absence of `FILE_PUBLISH` is
+exact negative evidence and the hold may be released safely. With publish failures
+configured as non-fatal, absence of the event remains ambiguous and is retained.
+Disabled publish directives are exact non-publication and do not create a retention
+hold.
 
-These are intentional descriptions of the current contract, not claims about the final design:
+## Semantic rules for test authors
 
-- `gc_mode = process` is the default policy; dependency closure and reclamation in this mode are producer-process scoped, not per-consumer-task or per-output-port;
-- `gc_mode = artifact` scopes liveness to the producer output port while still waiting for the producer process and every consumer process reachable from that port; it deliberately does not perform task-instance eager GC;
-- `publishDir` retention is artifact-level for pattern selection; link-family `saveAs` decisions use Nextflow's observed publication events, while async `saveAs` publication and disabled publication remain conservatively retained;
-- workflow-output presence is handled conservatively; artifact-level workflow-output provenance is not yet a GC decision surface;
-- artifact-mode output-port provenance is exact for legacy file outputs, including tuple file members; typed/V2 outputs without exact provenance resolve to `UNKNOWN` and are retained;
-- only realized Nextflow task outputs under established work ownership can be reclaimed; nf-gc is not a general work-directory cleaner;
-- uncertainty, failed/cached execution, external ownership, and unsupported target ownership resolve to retention.
+Functional tests should observe Nextflow events and filesystem state, not infer
+correctness from the current nf-gc implementation.
 
-A future capability changes this contract only after its expected behavior is represented by a functional test. The initial run may fail; that failure is the evidence that implementation work is required.
+In particular:
+
+- artifact-mode eager reclamation may be required only when the fixture proves
+  that the concrete artifact has no remaining legal demand; tests that distinguish
+  task-level reclamation derive the first eligible artifact from the observed task
+  lifecycle rather than assuming sample-label or scheduler order, then require
+  deletion after that artifact becomes eligible and before a later sibling task
+  becomes eligible. `PROCESS_TERMINATE` is not an artifact-mode deadline because
+  Nextflow may report processor termination before the final task-completion event;
+- shared singleton inputs, `collect`, `join`, and other delayed-demand shapes
+  must forbid premature deletion, but must not require eager deletion before a
+  safe demand-sealing boundary is observable;
+- conditional routing must follow the concrete artifact path rather than making
+  one routed item wait for consumer branches that never receive that item;
+- unknown ownership/provenance remains conservative unless a separate contract
+  explicitly establishes a safe reclaim rule;
+- overlapping ancestor/descendant output Paths are not independent deletion
+  units; the overlapping physical tree must remain conservative while unrelated
+  siblings may still follow their normal GC contract;
+- a declared output below a staged input directory belongs to that staged source
+  tree and must not be acquired as a new owned artifact from lexical work-path
+  membership alone;
+- a declared output reached through a task-created symlink ancestor, or a declared
+  symlink that aliases another declared output tree, is not an independent deletion
+  unit; when such an alias resolves into an upstream nf-gc-owned artifact tree, that
+  backing artifact is retained conservatively instead of inferring alias lineage;
+- undeclared files in a task work directory are not nf-gc artifacts merely
+  because they exist;
+- published, external, cached, failed, or otherwise protected artifacts remain
+  governed by their dedicated retention contracts.
+
+Process mode is a timing policy over the same concrete-Path detection model, not
+a separate ownership implementation. Process semantic tests must verify process
+boundaries without reintroducing producer-wide coupling between sibling Paths;
+artifact-mode tests must still prove earlier concrete last-use reclamation.
 
 ## Running the contract
 
-The one-time pinned toolchain setup remains separate:
+Install the pinned development toolchain once:
 
 ```bash
 ./scripts/bootstrap-dev.sh
 ```
 
-Run the complete validation from the repository root:
+Then run the complete validation from the repository root:
 
 ```bash
-./test.sh
+source scripts/env.sh
+./scripts/test.sh
 ```
 
-A change is acceptable only when the intended new/changed functional contract and all unaffected existing contracts pass together.
+A change is acceptable only when the intended semantic contract and all
+unaffected regression and unit contracts agree with the implementation.
+
+## Third-party acceptance
+
+Pull requests that change runtime, build, test, or acceptance surfaces also run a
+pinned `nf-core/rnaseq` 3.26.0 acceptance workload against Nextflow 26.04.6. The
+acceptance job executes three representative combinations in one runner so the
+nf-core checkout and Docker cache are shared:
+
+- `process + link`, as the conservative lifetime baseline for the production-relevant publish mode;
+- `artifact + link`, which must converge on the same eventual reclaim set while reclaiming concrete intermediates earlier;
+- `artifact + copy`, which exercises asynchronous publication reconciliation without making delayed publication a required limitation.
+
+The gate verifies 234 successful tasks, the frozen 171-artifact eventual reclaim
+set, parity of the concrete deletion multiset across the three runs, intact
+published mark-duplicate BAMs and MultiQC output, non-zero mid-run reclamation in
+`process + link`, and a strict mid-run timing advantage in `artifact + link`. The
+artifact-link run must also reclaim the STAR genomic BAMs, STAR transcriptome BAMs,
+and SAMtools sorted intermediate BAMs before the final task completes. This is a
+third-party acceptance layer, not the semantic specification; the small
+deterministic fixtures remain the primary behavioral contract.
+
+For timing investigations, prefer a targeted `artifact + link` rerun with the
+test trace enabled rather than inferring causality from wall-clock seconds.
+Correlate `ARTIFACT_ROUTE` with `TASK_*`, `RUNTIME_ROUTE_SEALED`,
+`OUTPUT_PORT_CLOSED`, and `ARTIFACT_DELETED` to identify the exact gate that made
+a Path reclaimable.

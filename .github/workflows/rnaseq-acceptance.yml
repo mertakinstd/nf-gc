@@ -1,0 +1,74 @@
+name: nf-core/rnaseq acceptance
+
+"on":
+  pull_request:
+    paths:
+      - ".github/workflows/ci.yml"
+      - ".github/workflows/rnaseq-acceptance.yml"
+      - "build.gradle"
+      - "gradle/**"
+      - "gradlew"
+      - "settings.gradle"
+      - "scripts/bootstrap-dev.sh"
+      - "scripts/env.sh"
+      - "scripts/ci/**"
+      - "src/**"
+      - "tests/**"
+  workflow_call:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: rnaseq-acceptance-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  rnaseq-acceptance:
+    name: Nextflow 26.04.6 / nf-core-rnaseq 3.26.0
+    runs-on: ubuntu-24.04
+    timeout-minutes: 75
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v6
+
+      - name: Cache pinned toolchain and nf-core asset checkout
+        uses: actions/cache@v4
+        with:
+          path: |
+            .tools
+            .nxf/assets
+            ~/.gradle/caches
+            ~/.gradle/wrapper
+          key: rnaseq-acceptance-${{ runner.os }}-${{ hashFiles('scripts/bootstrap-dev.sh', 'scripts/env.sh', 'gradlew', 'gradle/wrapper/gradle-wrapper.properties', 'settings.gradle', 'build.gradle') }}-e7ca46272c8f9d5ceee3f71759f4ba551d3217a4
+          restore-keys: |
+            rnaseq-acceptance-${{ runner.os }}-
+
+      - name: Bootstrap pinned toolchain
+        run: ./scripts/bootstrap-dev.sh
+
+      - name: Runner diagnostics
+        shell: bash
+        run: |
+          set -euo pipefail
+          docker --version
+          docker info --format '{{json .ServerVersion}}'
+          df -h
+
+      - name: Run three-way nf-core/rnaseq acceptance
+        run: ./scripts/ci/run-rnaseq-acceptance.sh
+
+      - name: Upload acceptance evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: nf-core-rnaseq-acceptance-${{ github.run_id }}
+          if-no-files-found: warn
+          retention-days: 7
+          path: |
+            .ci/rnaseq-acceptance/*/nf-gc-events.tsv
+            .ci/rnaseq-acceptance/*/trace.tsv
+            .ci/rnaseq-acceptance/*/nextflow.log
+            .ci/rnaseq-acceptance/*/console.log

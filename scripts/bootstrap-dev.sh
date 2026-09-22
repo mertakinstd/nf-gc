@@ -234,7 +234,7 @@ main() {
         log "Docker not found (optional; not required for core nf-gc development)"
     fi
 
-    log "Development environment is ready. Run: source env.sh"
+    log "Development environment is ready. Run: source scripts/env.sh"
 }
 
 main "$@"

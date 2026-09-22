@@ -1,0 +1,26 @@
+nextflow_pipeline {
+
+    name "nf-gc artifact pass-through workflow-output semantics"
+    script "tests/semantics/workflow_output_passthrough.nf"
+    config "tests/config/gc_mode_artifact.config"
+
+    test("retains an upstream concrete artifact when its pass-through lineage is a workflow output") {
+        then {
+            assert workflow.success
+            assert workflow.trace.failed().size() == 0
+
+            def events = path("$launchDir/nf-gc-events.tsv").readLines()
+            def sourceComplete = events.find { line ->
+                def fields = line.split('\t', 5)
+                fields.size() == 5 && fields[0] == 'TASK_COMPLETE' && fields[2] == 'WORKFLOW_PASSTHROUGH_SOURCE'
+            }
+            assert sourceComplete != null
+
+            def source = java.nio.file.Path.of(sourceComplete.split('\t', 5)[4]).resolve('source.txt')
+            assert events.any { it.startsWith('WORKFLOW_OUTPUT\tpublished_source\t') }
+            assert java.nio.file.Files.exists(source, java.nio.file.LinkOption.NOFOLLOW_LINKS)
+            assert !events.any { it == "ARTIFACT_DELETED\tWORKFLOW_PASSTHROUGH_SOURCE\t${source}" }
+            assert path("$launchDir/results/published/source.txt").exists()
+        }
+    }
+}

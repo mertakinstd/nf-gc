@@ -26,12 +26,13 @@ import nextflow.script.dsl.Description
  * Declares the public nf-gc configuration scope to Nextflow.
  */
 @ScopeName(GcConfig.CONFIG_SCOPE)
+@Description('Configures nf-gc garbage-collection behavior')
 @CompileStatic
 final class GcConfigScope implements ConfigScope {
 
     @ConfigOption
-    @Description('Garbage-collection dependency policy: process or artifact')
-    String gc_mode = GcMode.PROCESS.configValue
+    @Description('Garbage-collection dependency policy: artifact or process')
+    String gc_mode = GcMode.ARTIFACT.configValue
 
     GcConfigScope() {}
 

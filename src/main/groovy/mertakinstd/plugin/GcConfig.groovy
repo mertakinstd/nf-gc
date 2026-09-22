@@ -39,11 +39,11 @@ final class GcConfig {
     static GcConfig from(Session session) {
         final Object config = session?.config
         if( !(config instanceof Map) )
-            return new GcConfig(GcMode.PROCESS, false)
+            return new GcConfig(GcMode.ARTIFACT, false)
 
         final Object pluginConfig = ((Map) config).get(CONFIG_SCOPE)
         if( pluginConfig == null )
-            return new GcConfig(GcMode.PROCESS, false)
+            return new GcConfig(GcMode.ARTIFACT, false)
 
         if( !(pluginConfig instanceof Map) ) {
             throw new IllegalArgumentException(

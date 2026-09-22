@@ -8,7 +8,7 @@ import spock.lang.Specification
  */
 class GcConfigTest extends Specification {
 
-    def 'defaults gc_mode to process when nf-gc config is absent'() {
+    def 'defaults gc_mode to artifact when nf-gc config is absent'() {
         given:
         def session = Mock(Session) {
             getConfig() >> [:]
@@ -18,11 +18,11 @@ class GcConfigTest extends Specification {
         def config = GcConfig.from(session)
 
         then:
-        config.mode == GcMode.PROCESS
+        config.mode == GcMode.ARTIFACT
         !config.modeExplicit
     }
 
-    def 'defaults gc_mode to process when nfGc scope omits gc_mode'() {
+    def 'defaults gc_mode to artifact when nfGc scope omits gc_mode'() {
         given:
         def session = Mock(Session) {
             getConfig() >> [nfGc: [:]]
@@ -32,7 +32,7 @@ class GcConfigTest extends Specification {
         def config = GcConfig.from(session)
 
         then:
-        config.mode == GcMode.PROCESS
+        config.mode == GcMode.ARTIFACT
         !config.modeExplicit
     }
 
@@ -91,14 +91,19 @@ class GcConfigTest extends Specification {
         def error = thrown(IllegalArgumentException)
         error.message == "nf-gc config 'nfGc' must be a configuration scope"
     }
-    def 'formal config scope defaults gc_mode to process'() {
+    def 'formal config scope defaults gc_mode to artifact'() {
         expect:
-        new GcConfigScope().gc_mode == 'process'
+        new GcConfigScope().gc_mode == 'artifact'
     }
 
     def 'formal config scope preserves an explicit artifact mode'() {
         expect:
         new GcConfigScope([gc_mode: 'artifact']).gc_mode == 'artifact'
+    }
+
+    def 'formal config scope preserves an explicit process mode'() {
+        expect:
+        new GcConfigScope([gc_mode: 'process']).gc_mode == 'process'
     }
 
 }

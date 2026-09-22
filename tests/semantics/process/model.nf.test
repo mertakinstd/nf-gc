@@ -1,0 +1,308 @@
+nextflow_pipeline {
+
+    name "nf-gc process semantics"
+    script "tests/semantics/model.nf"
+    config "tests/config/gc_mode_process.config"
+
+    test("reclaims one-to-one artifacts only after the consumer process terminates") {
+        when {
+            params { publish_dir = "$launchDir/published" }
+        }
+        then {
+            assert workflow.success
+            assert workflow.trace.failed().size() == 0
+            def events = path("$launchDir/nf-gc-events.tsv").readLines()
+            assert events.count { it == 'GC_MODE\tprocess' } == 1
+
+            def sourceTerminated = events.findIndexOf { it == 'PROCESS_TERMINATE\tLINEAR_SOURCE' }
+            def consumerTerminated = events.findIndexOf { it == 'PROCESS_TERMINATE\tLINEAR_CONSUMER' }
+            assert sourceTerminated >= 0
+            assert consumerTerminated >= 0
+
+            ['one', 'two'].each { sample ->
+                def sourceComplete = events.find { line ->
+                    def f = line.split('\t', 5)
+                    f.size() == 5 && f[0] == 'TASK_COMPLETE' && f[2] == 'LINEAR_SOURCE' && f[3].contains("(${sample})")
+                }
+                assert sourceComplete != null
+                def artifact = java.nio.file.Path.of(sourceComplete.split('\t', 5)[4]).resolve("${sample}.linear.txt")
+                def deleted = events.findIndexOf { it == "ARTIFACT_DELETED\tLINEAR_SOURCE\t${artifact}" }
+                assert deleted > sourceTerminated
+                assert deleted > consumerTerminated
+            }
+        }
+    }
+
+    test("reclaims sibling output ports at their own consumer-process boundaries") {
+        when {
+            params { publish_dir = "$launchDir/published" }
+        }
+        then {
+            assert workflow.success
+            def events = path("$launchDir/nf-gc-events.tsv").readLines()
+
+            def sourceComplete = events.find { line ->
+                def f = line.split('\t', 5)
+                f.size() == 5 && f[0] == 'TASK_COMPLETE' && f[2] == 'SIBLING_SOURCE'
+            }
+            assert sourceComplete != null
+            def workDir = java.nio.file.Path.of(sourceComplete.split('\t', 5)[4])
+            def fastTerminated = events.findIndexOf { it == 'PROCESS_TERMINATE\tSIBLING_FAST' }
+            def slowTerminated = events.findIndexOf { it == 'PROCESS_TERMINATE\tSIBLING_SLOW' }
+            assert fastTerminated >= 0
+            assert slowTerminated > fastTerminated
+
+            def fast = workDir.resolve('sibling-fast.txt')
+            def slow = workDir.resolve('sibling-slow.txt')
+            def fastDeleted = events.findIndexOf { it == "ARTIFACT_DELETED\tSIBLING_SOURCE\t${fast}" }
+            def slowDeleted = events.findIndexOf { it == "ARTIFACT_DELETED\tSIBLING_SOURCE\t${slow}" }
+
+            assert fastDeleted > fastTerminated
+            assert fastDeleted < slowTerminated
+            assert slowDeleted > slowTerminated
+        }
+    }
+
+    test("waits for every fan-out consumer process before reclaiming producer artifacts") {
+        when {
+            params { publish_dir = "$launchDir/published" }
+        }
+        then {
+            assert workflow.success
+            def events = path("$launchDir/nf-gc-events.tsv").readLines()
+
+            def leftTerminated = events.findIndexOf { it == 'PROCESS_TERMINATE\tFANOUT_LEFT' }
+            def rightTerminated = events.findIndexOf { it == 'PROCESS_TERMINATE\tFANOUT_RIGHT' }
+            assert leftTerminated >= 0
+            assert rightTerminated >= 0
+
+            ['one', 'two'].each { sample ->
+                def sourceComplete = events.find { line ->
+                    def f = line.split('\t', 5)
+                    f.size() == 5 && f[0] == 'TASK_COMPLETE' && f[2] == 'FANOUT_SOURCE' && f[3].contains("(${sample})")
+                }
+                assert sourceComplete != null
+                def artifact = java.nio.file.Path.of(sourceComplete.split('\t', 5)[4]).resolve("${sample}.fanout.txt")
+                def deleted = events.findIndexOf { it == "ARTIFACT_DELETED\tFANOUT_SOURCE\t${artifact}" }
+                assert deleted > leftTerminated
+                assert deleted > rightTerminated
+            }
+        }
+    }
+
+    test("holds pass-through sources until the downstream relay process terminates") {
+        when {
+            params { publish_dir = "$launchDir/published" }
+        }
+        then {
+            assert workflow.success
+            def events = path("$launchDir/nf-gc-events.tsv").readLines()
+
+            def relayTerminated = events.findIndexOf { it == 'PROCESS_TERMINATE\tRELAY' }
+            def consumerTerminated = events.findIndexOf { it == 'PROCESS_TERMINATE\tRELAY_CONSUMER' }
+            assert relayTerminated >= 0
+            assert consumerTerminated >= 0
+
+            ['one', 'two'].each { sample ->
+                def sourceComplete = events.find { line ->
+                    def f = line.split('\t', 5)
+                    f.size() == 5 && f[0] == 'TASK_COMPLETE' && f[2] == 'RELAY_SOURCE' && f[3].contains("(${sample})")
+                }
+                assert sourceComplete != null
+                def artifact = java.nio.file.Path.of(sourceComplete.split('\t', 5)[4]).resolve("${sample}.relay.txt")
+                def deleted = events.findIndexOf { it == "ARTIFACT_DELETED\tRELAY_SOURCE\t${artifact}" }
+                assert deleted > relayTerminated
+                assert deleted > consumerTerminated
+            }
+        }
+    }
+
+    test("reclaims an unused output at producer-process termination without waiting for a used sibling") {
+        when {
+            params { publish_dir = "$launchDir/published" }
+        }
+        then {
+            assert workflow.success
+            def events = path("$launchDir/nf-gc-events.tsv").readLines()
+
+            def sourceTerminated = events.findIndexOf { it == 'PROCESS_TERMINATE\tUNUSED_SOURCE' }
+            def consumerTerminated = events.findIndexOf { it == 'PROCESS_TERMINATE\tUSED_CONSUMER' }
+            assert sourceTerminated >= 0
+            assert consumerTerminated >= 0
+
+            ['one', 'two'].each { sample ->
+                def sourceComplete = events.find { line ->
+                    def f = line.split('\t', 5)
+                    f.size() == 5 && f[0] == 'TASK_COMPLETE' && f[2] == 'UNUSED_SOURCE' && f[3].contains("(${sample})")
+                }
+                assert sourceComplete != null
+                def artifact = java.nio.file.Path.of(sourceComplete.split('\t', 5)[4]).resolve("${sample}.unused.txt")
+                def deleted = events.findIndexOf { it == "ARTIFACT_DELETED\tUNUSED_SOURCE\t${artifact}" }
+                assert deleted > sourceTerminated
+                assert deleted < consumerTerminated
+            }
+        }
+    }
+
+    test("reclaims terminal-process outputs at coarse process closure") {
+        when {
+            params { publish_dir = "$launchDir/published" }
+        }
+        then {
+            assert workflow.success
+            def events = path("$launchDir/nf-gc-events.tsv").readLines()
+            def processTerminated = events.findIndexOf { it == 'PROCESS_TERMINATE\tTERMINAL_SOURCE' }
+            def dependencyClosed = events.findIndexOf { it == 'DEPENDENCY_CLOSED\tTERMINAL_SOURCE' }
+            def flowComplete = events.findIndexOf { it == 'FLOW_COMPLETE' }
+            assert processTerminated >= 0
+            assert dependencyClosed > processTerminated
+            assert flowComplete > dependencyClosed
+
+            ['one', 'two'].each { sample ->
+                def sourceComplete = events.find { line ->
+                    def f = line.split('\t', 5)
+                    f.size() == 5 && f[0] == 'TASK_COMPLETE' && f[2] == 'TERMINAL_SOURCE' && f[3].contains("(${sample})")
+                }
+                assert sourceComplete != null
+                def artifact = java.nio.file.Path.of(sourceComplete.split('\t', 5)[4]).resolve("${sample}.terminal.txt")
+                def deleted = events.findIndexOf { it == "ARTIFACT_DELETED\tTERMINAL_SOURCE\t${artifact}" }
+                assert deleted > processTerminated
+                assert deleted < flowComplete
+                assert !java.nio.file.Files.exists(artifact, java.nio.file.LinkOption.NOFOLLOW_LINKS)
+            }
+        }
+    }
+
+
+    test("holds a shared singleton until the consumer process terminates") {
+        when {
+            params { publish_dir = "$launchDir/published" }
+        }
+        then {
+            assert workflow.success
+            def events = path("$launchDir/nf-gc-events.tsv").readLines()
+
+            def sourceComplete = events.find { line ->
+                def f = line.split('\t', 5)
+                f.size() == 5 && f[0] == 'TASK_COMPLETE' && f[2] == 'SHARED_INDEX'
+            }
+            def consumerTerminated = events.findIndexOf { it == 'PROCESS_TERMINATE\tINDEX_CONSUMER' }
+            def consumerCompletions = events.count { line ->
+                def f = line.split('\t', 5)
+                f.size() == 5 && f[0] == 'TASK_COMPLETE' && f[2] == 'INDEX_CONSUMER'
+            }
+            assert sourceComplete != null
+            assert consumerCompletions == 3
+            assert consumerTerminated >= 0
+
+            def artifact = java.nio.file.Path.of(sourceComplete.split('\t', 5)[4]).resolve('shared.index')
+            def deleted = events.findIndexOf { it == "ARTIFACT_DELETED\tSHARED_INDEX\t${artifact}" }
+            assert deleted > consumerTerminated
+        }
+    }
+
+    test("holds collected inputs until the aggregate consumer process terminates") {
+        when {
+            params { publish_dir = "$launchDir/published" }
+        }
+        then {
+            assert workflow.success
+            def events = path("$launchDir/nf-gc-events.tsv").readLines()
+
+            def consumerTerminated = events.findIndexOf { it == 'PROCESS_TERMINATE\tCOLLECT_CONSUMER' }
+            assert consumerTerminated >= 0
+
+            ['one', 'two', 'three'].each { sample ->
+                def sourceComplete = events.find { line ->
+                    def f = line.split('\t', 5)
+                    f.size() == 5 && f[0] == 'TASK_COMPLETE' && f[2] == 'COLLECT_SOURCE' && f[3].contains("(${sample})")
+                }
+                assert sourceComplete != null
+                def artifact = java.nio.file.Path.of(sourceComplete.split('\t', 5)[4]).resolve("${sample}.collect.txt")
+                def deleted = events.findIndexOf { it == "ARTIFACT_DELETED\tCOLLECT_SOURCE\t${artifact}" }
+                assert deleted > consumerTerminated
+            }
+        }
+    }
+
+    test("holds joined inputs until the keyed consumer process terminates") {
+        when {
+            params { publish_dir = "$launchDir/published" }
+        }
+        then {
+            assert workflow.success
+            def events = path("$launchDir/nf-gc-events.tsv").readLines()
+
+            def consumerTerminated = events.findIndexOf { it == 'PROCESS_TERMINATE\tJOIN_CONSUMER' }
+            assert consumerTerminated >= 0
+
+            ['early', 'late'].each { key ->
+                def leftComplete = events.find { line ->
+                    def f = line.split('\t', 5)
+                    f.size() == 5 && f[0] == 'TASK_COMPLETE' && f[2] == 'JOIN_LEFT_SOURCE' && f[3].contains("(${key})")
+                }
+                assert leftComplete != null
+                def artifact = java.nio.file.Path.of(leftComplete.split('\t', 5)[4]).resolve("${key}.left.txt")
+                def deleted = events.findIndexOf { it == "ARTIFACT_DELETED\tJOIN_LEFT_SOURCE\t${artifact}" }
+                assert deleted > consumerTerminated
+            }
+        }
+    }
+
+    test("keeps conditionally routed artifacts coupled until every potential consumer process terminates") {
+        when {
+            params { publish_dir = "$launchDir/published" }
+        }
+        then {
+            assert workflow.success
+            def events = path("$launchDir/nf-gc-events.tsv").readLines()
+
+            def leftTerminated = events.findIndexOf { it == 'PROCESS_TERMINATE\tROUTED_LEFT' }
+            def rightTerminated = events.findIndexOf { it == 'PROCESS_TERMINATE\tROUTED_RIGHT' }
+            assert leftTerminated >= 0
+            assert rightTerminated >= 0
+
+            ['left', 'right'].each { route ->
+                def sourceComplete = events.find { line ->
+                    def f = line.split('\t', 5)
+                    f.size() == 5 && f[0] == 'TASK_COMPLETE' && f[2] == 'ROUTED_SOURCE' && f[3].contains("(${route})")
+                }
+                assert sourceComplete != null
+                def artifact = java.nio.file.Path.of(sourceComplete.split('\t', 5)[4]).resolve("${route}.routed.txt")
+                def deleted = events.findIndexOf { it == "ARTIFACT_DELETED\tROUTED_SOURCE\t${artifact}" }
+                assert deleted > leftTerminated
+                assert deleted > rightTerminated
+                assert !java.nio.file.Files.exists(artifact, java.nio.file.LinkOption.NOFOLLOW_LINKS)
+            }
+        }
+    }
+
+    test("retains the published artifact while reclaiming its sibling after its consumer process terminates") {
+        when {
+            params { publish_dir = "$launchDir/published" }
+        }
+        then {
+            assert workflow.success
+            def events = path("$launchDir/nf-gc-events.tsv").readLines()
+
+            def sourceComplete = events.find { line ->
+                def f = line.split('\t', 5)
+                f.size() == 5 && f[0] == 'TASK_COMPLETE' && f[2] == 'PARTIAL_PUBLISH'
+            }
+            assert sourceComplete != null
+            def workDir = java.nio.file.Path.of(sourceComplete.split('\t', 5)[4])
+            def published = workDir.resolve('semantic.published.txt')
+            def ephemeral = workDir.resolve('semantic.ephemeral.txt')
+            def consumerTerminated = events.findIndexOf { it == 'PROCESS_TERMINATE\tEPHEMERAL_CONSUMER' }
+            def deleted = events.findIndexOf { it == "ARTIFACT_DELETED\tPARTIAL_PUBLISH\t${ephemeral}" }
+
+            assert consumerTerminated >= 0
+            assert events.any { it == "FILE_PUBLISH\t${published}" }
+            assert !events.any { it == "ARTIFACT_DELETED\tPARTIAL_PUBLISH\t${published}" }
+            assert deleted > consumerTerminated
+            assert java.nio.file.Files.exists(published, java.nio.file.LinkOption.NOFOLLOW_LINKS)
+            assert !java.nio.file.Files.exists(ephemeral, java.nio.file.LinkOption.NOFOLLOW_LINKS)
+            assert path("$launchDir/published/semantic.published.txt").exists()
+        }
+    }
+}

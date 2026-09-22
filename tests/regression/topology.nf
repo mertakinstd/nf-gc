@@ -4,85 +4,6 @@ include { WORK as WORK_A; WORK as WORK_B } from './modules/worker'
 
 params.scenario = null
 
-process DUAL_SOURCE {
-    output:
-    path 'fast.txt', emit: fast
-    path 'slow.txt', emit: slow
-
-    script:
-    """
-    echo fast > fast.txt
-    echo slow > slow.txt
-    """
-}
-
-process FAST_CONSUMER {
-    input:
-    path source
-
-    output:
-    path 'fast.done'
-
-    script:
-    """
-    sleep 1
-    cat "$source" > fast.done
-    """
-}
-
-process SLOW_CONSUMER {
-    input:
-    path source
-
-    output:
-    path 'slow.done'
-
-    script:
-    """
-    sleep 3
-    cat "$source" > slow.done
-    """
-}
-
-
-process SHARED_SOURCE {
-    output:
-    path 'shared.txt', emit: shared
-
-    script:
-    """
-    echo shared > shared.txt
-    """
-}
-
-process FAST_SHARED_CONSUMER {
-    input:
-    path source
-
-    output:
-    path 'shared.fast.done'
-
-    script:
-    """
-    sleep 1
-    cat "$source" > shared.fast.done
-    """
-}
-
-process SLOW_SHARED_CONSUMER {
-    input:
-    path source
-
-    output:
-    path 'shared.slow.done'
-
-    script:
-    """
-    sleep 3
-    cat "$source" > shared.slow.done
-    """
-}
-
 process INNER_SINK {
     input:
     path source
@@ -148,17 +69,7 @@ workflow INNER {
 }
 
 workflow {
-    if( params.scenario == 'dual_port' ) {
-        DUAL_SOURCE()
-        FAST_CONSUMER(DUAL_SOURCE.out.fast)
-        SLOW_CONSUMER(DUAL_SOURCE.out.slow)
-    }
-    else if( params.scenario == 'shared_port' ) {
-        SHARED_SOURCE()
-        FAST_SHARED_CONSUMER(SHARED_SOURCE.out.shared)
-        SLOW_SHARED_CONSUMER(SHARED_SOURCE.out.shared)
-    }
-    else if( params.scenario == 'scoped_aliases' ) {
+    if( params.scenario == 'scoped_aliases' ) {
         INNER(Channel.of('inner'))
         WORK_B(Channel.of('outer'))
         OUTER_SINK(WORK_B.out)

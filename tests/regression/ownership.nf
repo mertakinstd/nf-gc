@@ -70,6 +70,47 @@ process PASSTHROUGH_STAGE_COPY {
     """
 }
 
+
+process GENERATED_DIRECTORY_SOURCE {
+    output:
+    path 'bundle'
+
+    script:
+    """
+    mkdir bundle
+    echo upstream > bundle/item.txt
+    echo extra > bundle/extra.txt
+    """
+}
+
+
+process NESTED_UPSTREAM_REEMIT {
+    input:
+    path bundle
+
+    output:
+    path 'bundle/item.txt'
+
+    script:
+    """
+    test -f "$bundle/item.txt"
+    """
+}
+
+
+process NESTED_EXTERNAL_REEMIT {
+    input:
+    path bundle
+
+    output:
+    path 'bundle/item.txt'
+
+    script:
+    """
+    test -f "$bundle/item.txt"
+    """
+}
+
 process READ_LATE {
     input:
     path source
@@ -109,6 +150,22 @@ process DIRECTORY_WITH_EXTERNAL_SYMLINK {
     mkdir bundle
     echo local > bundle/local.txt
     ln -s "$external_path" bundle/external.txt
+    """
+}
+
+process SYMLINK_ANCESTOR_DESCENDANT {
+    input:
+    val external_dir
+
+    output:
+    path 'alias/item.txt', emit: item
+    path 'independent.txt', emit: independent
+
+    script:
+    """
+    ln -s "$external_dir" alias
+    test -f alias/item.txt
+    echo independent > independent.txt
     """
 }
 
@@ -308,6 +365,30 @@ process READ_INDEX {
     """
 }
 
+process OPAQUE_ALIAS_SOURCE {
+    output:
+    path 'opaque-source.txt'
+
+    script:
+    """
+    echo opaque > opaque-source.txt
+    """
+}
+
+process OPAQUE_ALIAS_CONSUMER {
+    input:
+    val source_path
+
+    output:
+    path 'opaque.done'
+
+    script:
+    """
+    sleep 1
+    cat "$source_path" > opaque.done
+    """
+}
+
 process STAGED_MULTI_SOURCE {
     input:
     path reads
@@ -331,6 +412,12 @@ workflow {
         java.nio.file.Files.writeString(external, 'external-data\n')
     }
 
+    if( params.scenario == 'nested_external_reemit' ) {
+        external_dir = file(params.external_path)
+        java.nio.file.Files.createDirectories(external_dir)
+        java.nio.file.Files.writeString(external_dir.resolve('item.txt'), 'external-nested\n')
+    }
+
     if( params.scenario == 'external_default' ) {
         COPY_EXTERNAL_DEFAULT(external)
         READ_LATE(COPY_EXTERNAL_DEFAULT.out)
@@ -343,7 +430,7 @@ workflow {
         PASSTHROUGH_DEFAULT(external)
         READ_LATE(PASSTHROUGH_DEFAULT.out)
     }
-    else if( params.scenario == 'passthrough_default' ) {
+    else if( params.scenario == 'passthrough_default_ownership' ) {
         GENERATED_SOURCE()
         PASSTHROUGH_DEFAULT(GENERATED_SOURCE.out)
         READ_LATE(PASSTHROUGH_DEFAULT.out)
@@ -352,6 +439,19 @@ workflow {
         GENERATED_SOURCE()
         PASSTHROUGH_STAGE_COPY(GENERATED_SOURCE.out)
         READ_LATE(PASSTHROUGH_STAGE_COPY.out)
+    }
+    else if( params.scenario == 'passthrough_terminal_ownership' ) {
+        GENERATED_SOURCE()
+        PASSTHROUGH_DEFAULT(GENERATED_SOURCE.out)
+    }
+    else if( params.scenario == 'nested_external_reemit' ) {
+        NESTED_EXTERNAL_REEMIT(external_dir)
+        READ_LATE(NESTED_EXTERNAL_REEMIT.out)
+    }
+    else if( params.scenario == 'nested_generated_reemit' ) {
+        GENERATED_DIRECTORY_SOURCE()
+        NESTED_UPSTREAM_REEMIT(GENERATED_DIRECTORY_SOURCE.out)
+        READ_LATE(NESTED_UPSTREAM_REEMIT.out)
     }
     else if( params.scenario == 'symlink_output' ) {
         external = file(params.external_path)
@@ -366,6 +466,13 @@ workflow {
         java.nio.file.Files.writeString(external, 'external-target\n')
         DIRECTORY_WITH_EXTERNAL_SYMLINK(external.toString())
         READ_DIRECTORY(DIRECTORY_WITH_EXTERNAL_SYMLINK.out)
+    }
+    else if( params.scenario == 'symlink_ancestor_descendant' ) {
+        external_dir = file(params.external_path)
+        java.nio.file.Files.createDirectories(external_dir)
+        java.nio.file.Files.writeString(external_dir.resolve('item.txt'), 'external-symlink-descendant\n')
+        SYMLINK_ANCESTOR_DESCENDANT(external_dir.toString())
+        READ_LATE(SYMLINK_ANCESTOR_DESCENDANT.out.independent)
     }
     else if( params.scenario == 'glob_outputs' ) {
         GLOB_SOURCE()
@@ -398,5 +505,10 @@ workflow {
     else if( params.scenario == 'staged_multi_output' ) {
         STAGED_MULTI_SOURCE(external)
         READ_PAIR(STAGED_MULTI_SOURCE.out.bam, STAGED_MULTI_SOURCE.out.bai)
+    }
+    else if( params.scenario == 'opaque_path_alias' ) {
+        OPAQUE_ALIAS_SOURCE()
+        alias = OPAQUE_ALIAS_SOURCE.out.map { path -> path.toString() }
+        OPAQUE_ALIAS_CONSUMER(alias)
     }
 }

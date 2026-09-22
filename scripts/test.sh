@@ -4,10 +4,10 @@
 
 set -euo pipefail
 
-ROOT="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
+ROOT="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$ROOT"
 
-source "$ROOT/env.sh"
+source "$ROOT/scripts/env.sh"
 
 ./gradlew clean test assemble installPlugin
 nf-test test tests --verbose

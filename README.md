@@ -1,22 +1,34 @@
-# nf-gc
+<h1 align="center">nf-gc</h1>
 
-## Summary
+<p align="center"><strong>Lifecycle-aware garbage collection for Nextflow work artifacts.</strong></p>
 
-`nf-gc` is a Nextflow plugin for conservative, shallow garbage collection of workflow artifacts. It tracks successful non-cached task outputs owned by the Nextflow work directory and reclaims eligible intermediates using either process-level or output-port-level dependency closure. When ownership or retention cannot be established safely, the artifact is kept.
+`nf-gc` reclaims eligible intermediate outputs from a Nextflow work directory while the workflow is still running. Its core entity is always a concrete `Path`: ownership, output provenance, downstream demand, publication, workflow-output retention, and deletion are tracked per artifact. The GC mode changes only the clock used to decide when that artifact is dead.
+
+<p align="center">
+  <img src="docs/diagram.svg" alt="nf-gc artifact lifecycle" width="1100">
+</p>
+
+`artifact` is the default and recommended mode. `process` uses the same artifact tracking and retention model, but reclaims at process-level boundaries. Unknown ownership or retention resolves to KEEP; liveness uncertainty falls back to a coarser safe boundary.
 
 ## Get Started
 
-Enable the plugin in your pipeline `nextflow.config`:
+Enable the plugin in `nextflow.config`:
 
 ```groovy
 plugins {
-    id 'nf-gc@0.2.0'
+    id 'nf-gc@0.3.0'
 }
 ```
 
-Nextflow downloads the published plugin from the Nextflow Registry when the pipeline runs. No nf-gc-specific pipeline configuration is required. If the `nfGc` scope or `nfGc.gc_mode` is not configured, nf-gc uses `process` mode. This preserves the GC policy exposed by nf-gc 0.1.0; `artifact` mode is opt-in.
+No nf-gc-specific configuration is required. Without an explicit setting, nf-gc uses:
 
-The policy can be selected explicitly from the plugin configuration:
+```groovy
+nfGc {
+    gc_mode = 'artifact'
+}
+```
+
+Use the coarser process clock explicitly when desired:
 
 ```groovy
 nfGc {
@@ -24,46 +36,60 @@ nfGc {
 }
 ```
 
-Supported modes are `process` and `artifact`. `process` is the backward-compatible default and preserves the original producer-wide closure semantics. `artifact` uses output-port-aware closure: an eligible artifact can be reclaimed after its producer process and every downstream consumer process reachable from that output port have terminated, without waiting for consumers of sibling output ports. Unknown values fail fast instead of silently changing GC semantics. At workflow startup nf-gc logs the resolved mode and whether the default was used.
+Both modes use the same concrete-Path detection and deletion model. On an exact direct route, `artifact` mode can reclaim a one-to-one intermediate after its concrete consumer task completes; an exact unused terminal output can be reclaimed at producer-task completion; fan-out and pass-through Paths stay live only while their concrete lineage can still require them. In `process` mode, those same Paths wait for the corresponding producer/consumer process boundaries. Sibling output ports do not keep one another alive simply because they share a producer.
 
-`nf-gc` requires Nextflow `26.04.0` or newer.
+Routes that pass through operators are not interpreted by operator name. nf-gc uses runtime route closure when Nextflow exposes a safe proof; topic-backed, opaque, or otherwise unprovable demand remains conservative and may require the successful global flow seal.
 
-## Examples
+`nf-gc` requires Nextflow `26.04.0` or newer and is validated against Nextflow `26.04.6`.
 
-Run any Nextflow pipeline with the plugin enabled, either from `nextflow.config` as above or from the command line:
+## Usage
 
-```bash
-nextflow run main.nf -plugins nf-gc@0.2.0
-```
-
-With `gc_mode = 'process'`, eligible intermediate task outputs remain available until their producer process becomes dependency-closed. With `gc_mode = 'artifact'`, each artifact follows the dependency closure of its producer output port; sibling output ports no longer extend one another's lifetime. Artifact mode remains process-granular within each port and does not perform task-instance eager GC. Publication-sensitive, terminal, cached, failed, external, or otherwise uncertain artifacts are retained conservatively.
-
-For repository development and the full regression suite:
+Run a pipeline normally with the plugin configured, or select it from the command line:
 
 ```bash
-./scripts/bootstrap-dev.sh
-source env.sh
-./test.sh
+nextflow run main.nf -plugins nf-gc@0.3.0
 ```
 
-## Scope and compatibility
+### Publication and peak disk
 
-- Minimum Nextflow version: `26.04.0`.
-- Validated development/runtime version: `26.04.6`.
-- Collection is shallow and limited to task outputs owned by the Nextflow work directory.
-- Cached tasks, failed or unknown task states, terminal process outputs, and outputs outside task work ownership are kept.
-- `publishDir` protection is artifact-level for pattern-selected outputs. For synchronous link-family publication, observed Nextflow publication events also resolve `saveAs` selection without re-running user closures; async `saveAs`, disabled publication, and otherwise ambiguous publication remain conservative.
-- Any configured workflow output currently keeps intermediate task outputs for the run; artifact-level workflow-output provenance is not yet modelled.
-- In `artifact` mode, exact output-port provenance is resolved for legacy file outputs, including file members of tuple outputs. Typed/V2 outputs without an exact declaration-to-port mapping resolve conservatively to `UNKNOWN` and are kept.
-- Staged external inputs are never acquired as owned artifacts. Re-emitted upstream artifacts are held until the relay dependency closes.
-- Filesystem deletion does not follow symbolic links.
-- Reclaimed artifacts are not guaranteed to remain available for a later `-resume` run.
+For the lowest peak disk usage, prefer `publishDir mode: 'link'` when the work and results paths are on the same filesystem. Hard-link publication does not duplicate the payload and gives nf-gc synchronous publication evidence. `copy` and `copyNoFollow` create independent result payloads and Nextflow publishes them asynchronously, so unresolved `saveAs` decisions may keep candidate work artifacts alive until successful flow completion. `symlink` and `rellink` also avoid payload duplication, but the published entry remains dependent on its work-directory backing target.
 
-The retention policy is intentionally conservative: uncertainty resolves to KEEP rather than DELETE.
+nf-gc never re-runs a user `saveAs` closure. It uses Nextflow's `FilePublishEvent` evidence instead. With normal fail-on-error publication, a successful flow completion can safely resolve deferred async candidates after the publication pool has drained; when publication failures are configured as non-fatal, absence of a publish event remains ambiguous and the source is kept.
+
+## Safety model
+
+nf-gc is intentionally conservative at boundaries it cannot prove. In particular:
+
+- only successful, non-cached outputs owned by the task work directory are candidates;
+- external/staged inputs are never acquired merely because they appear inside a task work directory;
+- exact workflow outputs and published artifacts are retained per concrete Path when provenance is known;
+- derived or unmatched workflow-output provenance falls back conservatively for the run;
+- `topic:` demand is not mistaken for a terminal DAG leaf;
+- ancestor/descendant outputs and filesystem aliases that are not independent deletion units are retained conservatively;
+- deletion never follows symbolic links;
+- reclaimed work artifacts are not guaranteed to remain available to a later `-resume` run.
+
+Ownership or retention uncertainty means KEEP. Liveness uncertainty means WAIT at a coarser safe boundary.
 
 ## Validation
 
-The behavior contract is covered by 46 functional regression cases against real Nextflow work directories and filesystem state. The plugin has also been integration-tested with `nf-core/rnaseq 3.26.0` using its official test profile, including STAR/Salmon, QC, MultiQC, hard-link publication, and nf-core-style `saveAs` retention gates.
+The repository has deterministic semantic tests for both clocks, regression tests for ownership/publication/filesystem safety, and a pinned `nf-core/rnaseq 3.26.0` acceptance workload against Nextflow `26.04.6`. The acceptance matrix runs `process + link`, `artifact + link`, and `artifact + copy`, requires the same eventual reclaim set across policies, and verifies that artifact mode retains a real mid-run timing advantage without damaging published results.
+
+For repository development:
+
+```bash
+./scripts/bootstrap-dev.sh
+source scripts/env.sh
+./scripts/test.sh
+```
+
+Test and field runs can enable nf-gc's lifecycle trace through Nextflow configuration:
+
+```groovy
+env.NF_GC_TEST_TRACE = 'true'
+```
+
+The trace is test-only observability and is not part of the public `nfGc` configuration API. A host-shell `export NF_GC_TEST_TRACE=true` alone does not enable it. See [tests/testing.md](tests/testing.md) for the behavioral contract and trace schema.
 
 ## Contributing
 

@@ -2,10 +2,16 @@ package mertakinstd.plugin
 
 import java.nio.file.Files
 import java.nio.file.Path
+import java.util.function.BiConsumer
 
+import groovyx.gpars.dataflow.DataflowBroadcast
+import nextflow.Session
 import nextflow.processor.TaskConfig
 import nextflow.processor.TaskProcessor
 import nextflow.processor.TaskRun
+import nextflow.script.ProcessConfigV1
+import nextflow.script.params.FileOutParam
+import nextflow.script.params.OutputsList
 import spock.lang.Specification
 import spock.lang.TempDir
 
@@ -177,7 +183,198 @@ class GcArtifactRegistryTest extends Specification {
     }
 
 
-    def 'artifact mode keeps typed outputs when exact output-port provenance is unavailable'() {
+    def 'process mode reclaims sibling Paths at independent output-port process closures'() {
+        given:
+        /* FileOutParam.getOutChannel() is a DataflowWriteChannel in
+         * Nextflow 26.04.6; use the real channel shape so this fixture exercises
+         * Path-to-port resolution instead of Spock's incompatible-return fallback. */
+        def fastChannel = new DataflowBroadcast()
+        def slowChannel = new DataflowBroadcast()
+        def fastParam = Mock(FileOutParam) { getOutChannel() >> fastChannel }
+        def slowParam = Mock(FileOutParam) { getOutChannel() >> slowChannel }
+        def outputs = new OutputsList()
+        outputs.add(fastParam)
+        outputs.add(slowParam)
+        def producerConfig = Mock(ProcessConfigV1) { getOutputs() >> outputs }
+        def producer = Mock(TaskProcessor) {
+            getName() >> 'SOURCE'
+            getConfig() >> producerConfig
+        }
+        def fastConsumer = process('FAST')
+        def slowConsumer = process('SLOW')
+
+        def consumers = new IdentityHashMap<TaskProcessor,Set<TaskProcessor>>()
+        def producers = new IdentityHashMap<TaskProcessor,Set<TaskProcessor>>()
+        [producer, fastConsumer, slowConsumer].each { process ->
+            consumers.put(process, identityProcessSet())
+            producers.put(process, identityProcessSet())
+        }
+        consumers.get(producer).addAll([fastConsumer, slowConsumer])
+        producers.get(fastConsumer).add(producer)
+        producers.get(slowConsumer).add(producer)
+
+        def fastPort = new GcProcessGraph.OutputPort(producer, fastChannel)
+        def slowPort = new GcProcessGraph.OutputPort(producer, slowChannel)
+        def outputPorts = new IdentityHashMap<TaskProcessor,Set<GcProcessGraph.OutputPort>>()
+        outputPorts.put(producer, new LinkedHashSet<GcProcessGraph.OutputPort>([fastPort, slowPort]))
+        outputPorts.put(fastConsumer, new LinkedHashSet<GcProcessGraph.OutputPort>())
+        outputPorts.put(slowConsumer, new LinkedHashSet<GcProcessGraph.OutputPort>())
+        def consumersByPort = new LinkedHashMap<GcProcessGraph.OutputPort,Set<TaskProcessor>>()
+        consumersByPort.put(fastPort, identityProcessSet([fastConsumer]))
+        consumersByPort.put(slowPort, identityProcessSet([slowConsumer]))
+        def inputPorts = new IdentityHashMap<TaskProcessor,Set<GcProcessGraph.OutputPort>>()
+        inputPorts.put(producer, new LinkedHashSet<GcProcessGraph.OutputPort>())
+        inputPorts.put(fastConsumer, new LinkedHashSet<GcProcessGraph.OutputPort>([fastPort]))
+        inputPorts.put(slowConsumer, new LinkedHashSet<GcProcessGraph.OutputPort>([slowPort]))
+        def routeKinds = new LinkedHashMap<GcProcessGraph.OutputPort,GcProcessGraph.PortRouteKind>()
+        routeKinds.put(fastPort, GcProcessGraph.PortRouteKind.DIRECT)
+        routeKinds.put(slowPort, GcProcessGraph.PortRouteKind.DIRECT)
+        def runtimeClosure = new LinkedHashMap<GcProcessGraph.OutputPort,Set<groovyx.gpars.dataflow.operator.DataflowProcessor>>()
+        runtimeClosure.put(fastPort, Collections.emptySet())
+        runtimeClosure.put(slowPort, Collections.emptySet())
+        def graph = new GcProcessGraph(
+            consumers, producers, outputPorts, consumersByPort, inputPorts,
+            routeKinds, runtimeClosure, new LinkedHashSet<GcProcessGraph.OutputPort>()
+        )
+        def trace = []
+        def traceSink = { String event, String detail ->
+            trace.add("${event}\t${detail}".toString())
+        } as BiConsumer<String,String>
+        def registry = new GcArtifactRegistry(graph, null, GcMode.PROCESS, traceSink)
+
+        def workDir = Files.createDirectories(tempDir.resolve('process-sibling-ports'))
+        def fastArtifact = Files.writeString(workDir.resolve('fast.txt'), 'fast')
+        def slowArtifact = Files.writeString(workDir.resolve('slow.txt'), 'slow')
+        def taskConfig = Mock(TaskConfig) { getPublishDir() >> Collections.emptyList() }
+        def task = Mock(TaskRun) {
+            getProcessor() >> producer
+            getCached() >> false
+            isSuccess() >> true
+            getWorkDir() >> workDir
+            getTargetDir() >> workDir
+            hasTypedInputsOutputs() >> false
+            getOutputsByType(FileOutParam) >> [(fastParam): fastArtifact, (slowParam): slowArtifact]
+            getInputFilesMap() >> Collections.emptyMap()
+            getInputs() >> Collections.emptyMap()
+            getConfig() >> taskConfig
+            getName() >> producer.name
+        }
+
+        when:
+        def update = registry.onTaskComplete(task)
+        registry.onProcessTerminated(producer)
+        registry.onProcessTerminated(fastConsumer)
+        def fastDeleted = registry.onOutputClosed(fastPort)
+
+        then:
+        update.tracked as Set == ([fastArtifact, slowArtifact] as Set)
+        trace.any { it.startsWith("ARTIFACT_ROUTE\t${fastArtifact}\t${fastPort}\tDIRECT\t") && it.contains('\tFAST\tfalse') }
+        trace.any { it.startsWith("ARTIFACT_ROUTE\t${slowArtifact}\t${slowPort}\tDIRECT\t") && it.contains('\tSLOW\tfalse') }
+        trace.any { it.startsWith("OUTPUT_PORT_CLOSED\t${fastPort}\tDIRECT\tFAST\tfalse") }
+        fastDeleted*.path == [fastArtifact]
+        !Files.exists(fastArtifact)
+        Files.exists(slowArtifact)
+
+        when:
+        registry.onProcessTerminated(slowConsumer)
+        def slowDeleted = registry.onOutputClosed(slowPort)
+
+        then:
+        trace.any { it.startsWith("OUTPUT_PORT_CLOSED\t${slowPort}\tDIRECT\tSLOW\tfalse") }
+        slowDeleted*.path == [slowArtifact]
+        !Files.exists(slowArtifact)
+    }
+
+
+    def 'successful flow completion is a final coarse seal even if process closure was not observed'() {
+        given:
+        def producer = process('PRODUCER')
+        def consumer = process('CONSUMER')
+        def graph = graph([[producer, consumer]])
+        def session = Mock(Session) {
+            getOutputs() >> Collections.emptyMap()
+            isSuccess() >> true
+        }
+        def registry = new GcArtifactRegistry(graph, session, GcMode.PROCESS)
+        def workDir = Files.createDirectories(tempDir.resolve('flow-seal'))
+        def artifact = Files.writeString(workDir.resolve('result.txt'), 'result')
+        def task = successfulTask(producer, workDir, [artifact] as Set<Path>)
+
+        when:
+        def update = registry.onTaskComplete(task)
+        def deletions = registry.onFlowComplete()
+
+        then:
+        update.tracked == [artifact]
+        deletions*.path == [artifact]
+        deletions*.status == [GcArtifactRegistry.DeleteStatus.DELETED]
+        !Files.exists(artifact)
+    }
+
+
+    def 'process mode waits for successful flow completion when demand requires the global seal'() {
+        given:
+        def producer = process('PRODUCER')
+        def session = Mock(Session) {
+            getOutputs() >> Collections.emptyMap()
+            isSuccess() >> true
+        }
+        def registry = new GcArtifactRegistry(globalSealGraph(producer), session, GcMode.PROCESS)
+        def workDir = Files.createDirectories(tempDir.resolve('process-global-seal'))
+        def artifact = Files.writeString(workDir.resolve('result.txt'), 'result')
+        def task = successfulTask(producer, workDir, [artifact] as Set<Path>)
+
+        when:
+        def update = registry.onTaskComplete(task)
+        def processClosed = registry.onDependencyClosed(producer)
+
+        then:
+        update.tracked == [artifact]
+        processClosed.empty
+        Files.exists(artifact)
+
+        when:
+        def flowDeletions = registry.onFlowComplete()
+
+        then:
+        flowDeletions*.path == [artifact]
+        flowDeletions*.status == [GcArtifactRegistry.DeleteStatus.DELETED]
+        !Files.exists(artifact)
+    }
+
+
+    def 'artifact process fallback also respects the global flow seal'() {
+        given:
+        def producer = process('PRODUCER')
+        def session = Mock(Session) {
+            getOutputs() >> Collections.emptyMap()
+            isSuccess() >> true
+        }
+        def registry = new GcArtifactRegistry(globalSealGraph(producer), session, GcMode.ARTIFACT)
+        def workDir = Files.createDirectories(tempDir.resolve('artifact-global-seal'))
+        def artifact = Files.writeString(workDir.resolve('result.txt'), 'result')
+        def task = successfulTask(producer, workDir, [artifact] as Set<Path>)
+
+        when:
+        def update = registry.onTaskComplete(task)
+        def processClosed = registry.onDependencyClosed(producer)
+
+        then:
+        update.tracked == [artifact]
+        processClosed.empty
+        Files.exists(artifact)
+
+        when:
+        def flowDeletions = registry.onFlowComplete()
+
+        then:
+        flowDeletions*.path == [artifact]
+        flowDeletions*.status == [GcArtifactRegistry.DeleteStatus.DELETED]
+        !Files.exists(artifact)
+    }
+
+
+    def 'artifact mode falls back to process closure when exact output-port provenance is unavailable'() {
         given:
         def producer = process('PRODUCER')
         def consumer = process('CONSUMER')
@@ -189,13 +386,124 @@ class GcArtifactRegistryTest extends Specification {
 
         when:
         def update = registry.onTaskComplete(task)
+        def deletions = registry.onDependencyClosed(producer)
 
         then:
-        update.keepReason == GcArtifactRegistry.KEEP_UNKNOWN
-        update.tracked.empty
+        update.tracked == [artifact]
         update.deletions.empty
+        deletions*.status == [GcArtifactRegistry.DeleteStatus.DELETED]
+        !Files.exists(artifact)
+    }
+
+    def 'artifact output-port resolver failure falls back to process liveness when retention does not depend on it'() {
+        given:
+        def legacyConfig = Mock(ProcessConfigV1) {
+            getOutputs() >> { throw new IllegalStateException('broken output provenance') }
+        }
+        def producer = Mock(TaskProcessor) {
+            getName() >> 'PRODUCER'
+            getConfig() >> legacyConfig
+        }
+        def consumer = process('CONSUMER')
+        def graph = graph([[producer, consumer]])
+        def registry = new GcArtifactRegistry(graph, null, GcMode.ARTIFACT)
+        def workDir = Files.createDirectories(tempDir.resolve('artifact-port-error'))
+        def artifact = Files.writeString(workDir.resolve('result.txt'), 'result')
+        def task = legacySuccessfulTask(producer, workDir, artifact)
+
+        when:
+        def update = registry.onTaskComplete(task)
+        def deletions = registry.onDependencyClosed(producer)
+
+        then:
+        update.tracked == [artifact]
+        update.deletions.empty
+        deletions*.status == [GcArtifactRegistry.DeleteStatus.DELETED]
+        !Files.exists(artifact)
+    }
+
+    def 'workflow retention resolver failure remains conservative instead of becoming a liveness fallback'() {
+        given:
+        def legacyConfig = Mock(ProcessConfigV1) {
+            getOutputs() >> { throw new IllegalStateException('broken workflow provenance') }
+        }
+        def producer = Mock(TaskProcessor) {
+            getName() >> 'PRODUCER'
+            getConfig() >> legacyConfig
+        }
+        def consumer = process('CONSUMER')
+        def graph = graph([[producer, consumer]])
+        def session = Mock(Session) {
+            getOutputs() >> [result: new Object()]
+            isSuccess() >> true
+        }
+        def registry = new GcArtifactRegistry(graph, session, GcMode.ARTIFACT)
+        registry.setWorkflowOutputPorts(graph.outputPortsOf(producer), true)
+        def workDir = Files.createDirectories(tempDir.resolve('workflow-port-error'))
+        def artifact = Files.writeString(workDir.resolve('result.txt'), 'result')
+        def task = legacySuccessfulTask(producer, workDir, artifact)
+
+        when:
+        def update = registry.onTaskComplete(task)
+        def processClosed = registry.onDependencyClosed(producer)
+        def flowDeletions = registry.onFlowComplete()
+
+        then:
+        update.keepReason == GcArtifactRegistry.KEEP_WORKFLOW_OUTPUT
+        update.tracked.empty
+        processClosed.empty
+        flowDeletions.empty
         Files.exists(artifact)
     }
+
+
+    def 'artifact pass-through without exact port provenance uses coarse process fallback instead of permanent retention'() {
+        given:
+        def producer = process('PRODUCER')
+        def relay = process('RELAY')
+        def graph = graph([[producer, relay]])
+        def session = Mock(Session) {
+            getOutputs() >> Collections.emptyMap()
+            isSuccess() >> true
+        }
+        def registry = new GcArtifactRegistry(graph, session, GcMode.ARTIFACT)
+
+        def producerWork = Files.createDirectories(tempDir.resolve('artifact-pass-source'))
+        def source = Files.writeString(producerWork.resolve('source.txt'), 'source')
+        def producerTask = successfulTask(producer, producerWork, [source] as Set<Path>)
+
+        def relayWork = Files.createDirectories(tempDir.resolve('artifact-pass-relay'))
+        def staged = relayWork.resolve('source.txt')
+        Files.createSymbolicLink(staged, source)
+        def relayTask = successfulTask(
+            relay,
+            relayWork,
+            [staged] as Set<Path>,
+            ['source.txt': source]
+        )
+
+        when:
+        def producerUpdate = registry.onTaskComplete(producerTask)
+        registry.onTaskPending(relayTask)
+        def producerClosed = registry.onDependencyClosed(producer)
+        def relayUpdate = registry.onTaskComplete(relayTask)
+        def relayClosed = registry.onDependencyClosed(relay)
+
+        then:
+        producerUpdate.tracked == [source]
+        producerClosed.empty
+        relayUpdate.deletions.empty
+        relayClosed*.path == [source]
+        relayClosed*.status == [GcArtifactRegistry.DeleteStatus.DELETED]
+        !Files.exists(source)
+
+        when:
+        def flowDeletions = registry.onFlowComplete()
+
+        then:
+        flowDeletions.empty
+    }
+
 
     def 'missing artifacts become a terminal missing result without crashing'() {
         given:
@@ -247,6 +555,25 @@ class GcArtifactRegistryTest extends Specification {
         }
     }
 
+    private TaskRun legacySuccessfulTask(TaskProcessor process, Path workDir, Path output) {
+        def fileParam = Mock(FileOutParam)
+        def config = Mock(TaskConfig) {
+            getPublishDir() >> Collections.emptyList()
+        }
+        return Mock(TaskRun) {
+            getProcessor() >> process
+            getCached() >> false
+            isSuccess() >> true
+            getWorkDir() >> workDir
+            getTargetDir() >> workDir
+            hasTypedInputsOutputs() >> false
+            getOutputsByType(FileOutParam) >> [(fileParam): output]
+            getInputFilesMap() >> Collections.emptyMap()
+            getConfig() >> config
+            getName() >> process.name
+        }
+    }
+
     private static GcProcessGraph graph(List<List<TaskProcessor>> edges) {
         def consumers = new IdentityHashMap<TaskProcessor,Set<TaskProcessor>>()
         def producers = new IdentityHashMap<TaskProcessor,Set<TaskProcessor>>()
@@ -265,10 +592,81 @@ class GcArtifactRegistryTest extends Specification {
             producers.get(consumer).add(producer)
         }
 
-        return new GcProcessGraph(consumers, producers)
+        /* Unit tests construct the process projection directly rather than through
+         * a real Nextflow DAG. Give each synthetic producer one output port so the
+         * coarse lifecycle boundary matches the represented process edge instead
+         * of looking like declaration-opaque global demand. */
+        def outputPorts = new IdentityHashMap<TaskProcessor,Set<GcProcessGraph.OutputPort>>()
+        def consumersByPort = new LinkedHashMap<GcProcessGraph.OutputPort,Set<TaskProcessor>>()
+        def inputPorts = new IdentityHashMap<TaskProcessor,Set<GcProcessGraph.OutputPort>>()
+        def routeKinds = new LinkedHashMap<GcProcessGraph.OutputPort,GcProcessGraph.PortRouteKind>()
+        def runtimeClosure = new LinkedHashMap<GcProcessGraph.OutputPort,Set<groovyx.gpars.dataflow.operator.DataflowProcessor>>()
+
+        consumers.keySet().each { TaskProcessor process ->
+            outputPorts.put(process, new LinkedHashSet<GcProcessGraph.OutputPort>())
+            inputPorts.put(process, new LinkedHashSet<GcProcessGraph.OutputPort>())
+        }
+
+        consumers.each { TaskProcessor producer, Set<TaskProcessor> downstream ->
+            def port = new GcProcessGraph.OutputPort(producer, new Object())
+            outputPorts.get(producer).add(port)
+            consumersByPort.put(port, downstream)
+            routeKinds.put(
+                port,
+                downstream.isEmpty()
+                    ? GcProcessGraph.PortRouteKind.TERMINAL
+                    : GcProcessGraph.PortRouteKind.DIRECT
+            )
+            runtimeClosure.put(port, Collections.emptySet())
+            downstream.each { TaskProcessor consumer -> inputPorts.get(consumer).add(port) }
+        }
+
+        return new GcProcessGraph(
+            consumers,
+            producers,
+            outputPorts,
+            consumersByPort,
+            inputPorts,
+            routeKinds,
+            runtimeClosure,
+            new LinkedHashSet<GcProcessGraph.OutputPort>()
+        )
     }
 
-    private static Set<TaskProcessor> identityProcessSet() {
-        return Collections.newSetFromMap(new IdentityHashMap<TaskProcessor,Boolean>())
+    private static GcProcessGraph globalSealGraph(TaskProcessor process) {
+        def consumers = new IdentityHashMap<TaskProcessor,Set<TaskProcessor>>()
+        def producers = new IdentityHashMap<TaskProcessor,Set<TaskProcessor>>()
+        consumers.put(process, identityProcessSet())
+        producers.put(process, identityProcessSet())
+
+        def port = new GcProcessGraph.OutputPort(process, new Object())
+        def outputPorts = new IdentityHashMap<TaskProcessor,Set<GcProcessGraph.OutputPort>>()
+        outputPorts.put(process, new LinkedHashSet<GcProcessGraph.OutputPort>([port]))
+        def consumersByPort = new LinkedHashMap<GcProcessGraph.OutputPort,Set<TaskProcessor>>()
+        consumersByPort.put(port, identityProcessSet())
+        def inputPorts = new IdentityHashMap<TaskProcessor,Set<GcProcessGraph.OutputPort>>()
+        inputPorts.put(process, new LinkedHashSet<GcProcessGraph.OutputPort>())
+        def routeKinds = new LinkedHashMap<GcProcessGraph.OutputPort,GcProcessGraph.PortRouteKind>()
+        routeKinds.put(port, GcProcessGraph.PortRouteKind.FALLBACK)
+        def runtimeClosure = new LinkedHashMap<GcProcessGraph.OutputPort,Set<groovyx.gpars.dataflow.operator.DataflowProcessor>>()
+        runtimeClosure.put(port, Collections.emptySet())
+
+        return new GcProcessGraph(
+            consumers,
+            producers,
+            outputPorts,
+            consumersByPort,
+            inputPorts,
+            routeKinds,
+            runtimeClosure,
+            new LinkedHashSet<GcProcessGraph.OutputPort>([port])
+        )
+    }
+
+
+    private static Set<TaskProcessor> identityProcessSet(Collection<TaskProcessor> values=Collections.emptyList()) {
+        def result = Collections.newSetFromMap(new IdentityHashMap<TaskProcessor,Boolean>())
+        result.addAll(values)
+        return result
     }
 }

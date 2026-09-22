@@ -1,0 +1,40 @@
+nextflow_pipeline {
+
+    name "nf-gc artifact overlapping-output containment"
+    script "tests/semantics/overlapping_outputs.nf"
+    config "tests/config/gc_mode_artifact.config"
+
+    test("retains overlapping declared Paths as one conservative physical tree") {
+        when {
+            params { publish_dir = "$launchDir/published" }
+        }
+        then {
+            assert workflow.success
+            assert workflow.trace.failed().size() == 0
+
+            def events = path("$launchDir/nf-gc-events.tsv").readLines()
+            def sourceComplete = events.find { line ->
+                def f = line.split('\t', 5)
+                f.size() == 5 && f[0] == 'TASK_COMPLETE' && f[2] == 'OVERLAPPING_SOURCE'
+            }
+            assert sourceComplete != null
+
+            def workDir = java.nio.file.Path.of(sourceComplete.split('\t', 5)[4])
+            def bundle = workDir.resolve('bundle')
+            def item = bundle.resolve('item.txt')
+            def independent = workDir.resolve('independent.txt')
+
+            assert java.nio.file.Files.exists(bundle, java.nio.file.LinkOption.NOFOLLOW_LINKS)
+            assert java.nio.file.Files.exists(item, java.nio.file.LinkOption.NOFOLLOW_LINKS)
+            assert !events.any { it == "ARTIFACT_DELETED\tOVERLAPPING_SOURCE\t${bundle}" }
+            assert !events.any { it == "ARTIFACT_DELETED\tOVERLAPPING_SOURCE\t${item}" }
+            assert events.any { it == "ARTIFACT_DELETED\tOVERLAPPING_SOURCE\t${independent}" }
+            assert !java.nio.file.Files.exists(independent, java.nio.file.LinkOption.NOFOLLOW_LINKS)
+
+            assert path("$launchDir/published/bundle/item.txt").exists()
+            assert path("$launchDir/published/bundle/extra.txt").exists()
+            assert path("$launchDir/results/workflow/bundle/item.txt").exists()
+            assert path("$launchDir/results/workflow/bundle/extra.txt").exists()
+        }
+    }
+}

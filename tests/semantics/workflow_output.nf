@@ -2,11 +2,13 @@ nextflow.enable.dsl=2
 
 process WORKFLOW_SOURCE {
     output:
-    path 'source.txt'
+    path 'final.txt', emit: final_output
+    path 'intermediate.txt', emit: intermediate
 
     script:
     """
-    echo workflow-output > source.txt
+    echo final > final.txt
+    echo intermediate > intermediate.txt
     """
 }
 
@@ -19,7 +21,6 @@ process WORKFLOW_CONSUMER {
 
     script:
     """
-    sleep 2
     cat "$source" > consumed.txt
     """
 }
@@ -27,14 +28,14 @@ process WORKFLOW_CONSUMER {
 workflow {
     main:
     WORKFLOW_SOURCE()
-    WORKFLOW_CONSUMER(WORKFLOW_SOURCE.out)
+    WORKFLOW_CONSUMER(WORKFLOW_SOURCE.out.intermediate)
 
     publish:
-    published_source = WORKFLOW_SOURCE.out
+    published_final = WORKFLOW_SOURCE.out.final_output
 }
 
 output {
-    published_source {
+    published_final {
         path 'published'
         mode 'copy'
     }
